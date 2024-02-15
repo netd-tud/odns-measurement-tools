@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	debug = true
+	debug = false
 )
 
 // config
@@ -438,10 +438,7 @@ func handle_pkt(pkt gopacket.Packet) {
 				if debug {
 					log.Println("missing PSH-ACK, dropping")
 				}
-				// to do this properly in theory, we would also need to send a FIN-ACK back to the server here,
-				// because the connection we once established still remains intact and the remote server is asking to terminate it
 				send_ack_pos_fin(ip.SrcIP, tcp.DstPort, tcp.Seq, tcp.Ack, true)
-				// TODO now we could check if the correct key ACK-(1+DNS_PAYLOAD_SIZE) exists and remove that one from the dictionary
 				return
 			}
 			if debug {
@@ -453,15 +450,6 @@ func handle_pkt(pkt gopacket.Packet) {
 	} else
 	// PSH-ACK || FIN-PSH-ACK == DNS Response
 	if tcpflags.is_PSH_ACK() || tcpflags.is_FIN_PSH_ACK() {
-		// TODO there is the case where some dns servers tend to respond to the initial query
-		// only after a very long time (more than 120 seconds)
-		// meanwhile they send keep-alive packets (with what seems like exponentially increasing delay)
-		// I'm not yet sure if we should handle this case
-		// this would mean updating the timeout to not trigger the keys removal from the map
-		// if we dont handle this case though, maybe we should sent out FIN-ACKs which we would have to respond to with an ACK
-		// which is a bit difficult as we dont really know if the receiving FIN-ACKs are in response to ours or self-initiated (or just RSTs)
-		// if we dont terminate the connection it might interfere with another newly established connection
-
 		if debug {
 			log.Println("received PSH-ACK or FIN-PSH-ACK")
 		}
@@ -470,7 +458,6 @@ func handle_pkt(pkt gopacket.Packet) {
 		// remove the first two bytes of the payload, i.e. size of the dns response
 		// see build_ack_with_dns()
 		if len(tcp.LayerPayload()) <= 2 {
-			//TODO this could be the point where we handle the keep-alive pkt
 			return
 		}
 		// validate payload size
@@ -653,7 +640,7 @@ func init_tcp(port_min uint16, port_max uint16) {
 	for {
 		select {
 		case dst_ip := <-ip_chan:
-			// check for if ip is excluded in the blocklist
+			// check if ip is excluded in the blocklist
 			should_exclude := false
 			for _, blocked_net := range blocked_nets {
 				if blocked_net.Contains(dst_ip) {
@@ -699,7 +686,7 @@ func read_ips_file(fname string) {
 		log.Fatal(err)
 	}
 	// wait some time to send out SYNs & handle the responses
-	// of the IPs just read
+	// of the IPs just read before ending the program
 	if debug {
 		log.Println("read all ips, waiting to end ...")
 	}
@@ -796,7 +783,7 @@ func gen_ips(netip net.IP, hostsize int) {
 		ip_chan <- uint322ip(netip_int + uint32(val))
 	}
 	// wait some time to send out SYNs & handle the responses
-	// of the IPs just read
+	// of the IPs just read before ending the program
 	if debug {
 		log.Println("all ips generated, waiting to end ...")
 	}
@@ -809,6 +796,7 @@ func exclude_ips() {
 	if _, err := os.Stat(cfg.Excl_ips_fname); errors.Is(err, os.ErrNotExist) {
 		if debug {
 			log.Println("ip exclusion list not found, skipping")
+			log.Println("exclusion list filename was read as:", cfg.Excl_ips_fname)
 		}
 		return
 	}
@@ -832,9 +820,16 @@ func exclude_ips() {
 			continue
 		}
 		_, new_net, err := net.ParseCIDR(pos_net)
-		if err != nil {
-			panic(err)
+		if err != nil { // if there are errors try if the string maybe is a single ip
+			toblock_ip := net.ParseIP(pos_net)
+			if toblock_ip == nil {
+				log.Println("could not interpret line, skipping")
+				continue
+			}
+			mask := net.CIDRMask(32, 32) // 32 bits for IPv4
+			new_net = &net.IPNet{IP: toblock_ip, Mask: mask}
 		}
+
 		blocked_nets = append(blocked_nets, new_net)
 		if debug {
 			log.Println("added blocked net:", new_net.String())
@@ -847,7 +842,7 @@ func exclude_ips() {
 }
 
 func main() {
-	// TODO run iptables command so that kernel doesnt send out RSTs
+	// before running the script run below iptables command so that kernel doesn't send out RSTs
 	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 
 	// write start ts to log

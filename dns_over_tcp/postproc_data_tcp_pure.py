@@ -32,7 +32,7 @@ else:
 
 # we will read the input csv
 # as soon as we learn some new information from a line, the output "dataframe" will be updated
-# we will disregard any information not needed (like the timestamp, port, & seqnums)
+# we will disregard any information not needed (like the port, & seqnums)
 # the response ip will be determined by the srcip of the PSH-ACK, this will be correct for both types of forwarders
 # we will only check if a SYN-ACK is in principle present in the input csv
 with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
@@ -51,8 +51,10 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
             outitem.target_ip = ip_address(split[InPos.IP.value])
             outitem.timestamp = split[InPos.TS.value]
             outitem.integrity = outitem.integrity | 0x4
+	    # a SYN-ACK
         elif split[InPos.FLAGS.value] == "SA":
             outitem.integrity = outitem.integrity | 0x2
+	    # and a PSH-ACK or FIN-PSH-ACK
         elif split[InPos.FLAGS.value] == "PA" or split[InPos.FLAGS.value] == "FPA":
             outitem.response_ip = ip_address(split[InPos.IP.value])
             arecs = split[InPos.RECS.value].split(",")
