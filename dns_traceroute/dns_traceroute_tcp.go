@@ -1,18 +1,12 @@
 package main
 
 import (
-	"bufio"
-	"compress/gzip"
 	"encoding/binary"
-	"encoding/csv"
 	"fmt"
 	"log"
-	"math"
-	"math/rand"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"time"
 
@@ -30,7 +24,7 @@ import (
 )
 
 const (
-	debug = true
+	debug = false
 )
 
 // config
@@ -89,6 +83,16 @@ func (flags TCP_flags) is_SYN_ACK() bool {
 	})
 }
 
+func (flags TCP_flags) is_SYN() bool {
+	return flags.equals(TCP_flags{
+		FIN: false,
+		SYN: true,
+		RST: false,
+		PSH: false,
+		ACK: false,
+	})
+}
+
 func (flags TCP_flags) is_FIN_ACK() bool {
 	return flags.equals(TCP_flags{
 		FIN: true,
@@ -111,7 +115,18 @@ func (flags TCP_flags) is_FIN_PSH_ACK() bool {
 
 var DNS_PAYLOAD_SIZE uint16
 
+var initialIP net.IP
+var firstToSynAck net.IP
+
+var dns_traceroute_hop_counter = 0
+
 var waiting_to_end = false
+
+var traceroute_mutex sync.Mutex
+var syn_ack_received = false
+var dns_reply_received = false
+
+var dns_traceroute_port = layers.TCPPort(10000)
 
 /*	id:
 *	(seq-num)		(Ports from 61440)   	(2048 byte padding)
@@ -146,110 +161,16 @@ func (item *scan_data_item) last() *scan_data_item {
 // key for the map below
 type scan_item_key struct {
 	port layers.TCPPort
-	seq  uint32
 }
 
-// map to track tcp connections, key is a tuple of (port, seq)
+// map to track tcp connections, key is a port
 type root_scan_data struct {
 	mu    sync.Mutex
 	items map[scan_item_key]*scan_data_item
 }
 
-var scan_data root_scan_data = root_scan_data{
+var dns_icmp_data root_scan_data = root_scan_data{
 	items: make(map[scan_item_key]*scan_data_item),
-}
-
-var write_chan = make(chan *scan_data_item, 4096)
-
-func scan_item_to_strarr(scan_item *scan_data_item) []string {
-	// transform scan_item into string array for csv writer
-	var record []string
-	record = append(record, strconv.Itoa(int(scan_item.id)))
-	record = append(record, scan_item.ts.Format("2006-01-02 15:04:05.000000"))
-	record = append(record, scan_item.ip.String())
-	record = append(record, scan_item.port.String())
-	record = append(record, strconv.Itoa(int(scan_item.seq)))
-	record = append(record, strconv.Itoa(int(scan_item.ack)))
-	var flags string
-	if scan_item.flags.SYN {
-		flags += "S"
-	}
-	if scan_item.flags.RST {
-		flags += "R"
-	}
-	if scan_item.flags.FIN {
-		flags += "F"
-	}
-	if scan_item.flags.PSH {
-		flags += "P"
-	}
-	if scan_item.flags.ACK {
-		flags += "A"
-	}
-	record = append(record, flags)
-	dns_answers := ""
-	for i, dns_ip := range scan_item.dns_recs {
-		dns_answers += dns_ip.String()
-		if i != len(scan_item.dns_recs)-1 {
-			dns_answers += ","
-		}
-	}
-	record = append(record, dns_answers)
-	return record
-}
-
-func write_results() {
-	defer wg.Done()
-	csvfile, err := os.Create("tcp_results.csv.gz")
-	if err != nil {
-		panic(err)
-	}
-	defer csvfile.Close()
-
-	zip_writer := gzip.NewWriter(csvfile)
-	defer zip_writer.Close()
-
-	writer := csv.NewWriter(zip_writer)
-	writer.Comma = ';'
-	defer writer.Flush()
-
-	for {
-		select {
-		case root_item := <-write_chan:
-			scan_item := root_item
-			for scan_item != nil {
-				writer.Write(scan_item_to_strarr(scan_item))
-				scan_item = scan_item.Next
-			}
-			// remove entry from map
-			scan_data.mu.Lock()
-			delete(scan_data.items, scan_item_key{root_item.port, root_item.seq})
-			scan_data.mu.Unlock()
-		case <-stop_chan:
-			return
-		}
-	}
-}
-
-// periodically remove keys (=connections) that get no response from map
-func timeout() {
-	defer wg.Done()
-	for {
-		select {
-		case <-time.After(10 * time.Second):
-			//go through map's keyset
-			scan_data.mu.Lock()
-			for k, v := range scan_data.items {
-				//remove each key where its timestamp is older than x seconds
-				if time.Now().Unix()-v.ts.Unix() > 10 {
-					delete(scan_data.items, k)
-				}
-			}
-			scan_data.mu.Unlock()
-		case <-stop_chan:
-			return
-		}
-	}
 }
 
 var opts gopacket.SerializeOptions = gopacket.SerializeOptions{
@@ -361,6 +282,8 @@ func send_ack_pos_fin(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ac
 }
 
 func handle_pkt(pkt gopacket.Packet) {
+	var sourcePort layers.TCPPort
+
 	ip_layer := pkt.Layer(layers.LayerTypeIPv4)
 	if ip_layer == nil {
 		return
@@ -378,8 +301,46 @@ func handle_pkt(pkt gopacket.Packet) {
 		//icmpPacket, _ := icmp_layer.(*layers.ICMPv4)
 
 		// Print information about the ICMPv4 packet
-		log.Println("IPv4 Source: ", ip.SrcIP)
-		log.Println("IPv4 Destination: ", ip.DstIP)
+		//log.Println("IPv4 Source: ", ip.SrcIP)
+		//log.Println("IPv4 Destination: ", ip.DstIP)
+
+		// Extract the encapsulated TCP layer
+		// The TCP layer is truncated, however, we only need the src port which is encoded in the first 2 bytes of the ip payload
+
+		// get icmp payload bytes
+		payloadBytes := icmp.LayerPayload()
+		if payloadBytes == nil {
+			return
+		}
+		//handle icmp payload as new ipv4 packet (Time Exceeded Message returns IP header + 8 bytes of ip payload)
+		packet := gopacket.NewPacket(payloadBytes, layers.LayerTypeIPv4, gopacket.Default)
+
+		if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+			inner_ip, _ := ipLayer.(*layers.IPv4)
+			// Decode source port (first 2 bytes)
+			sourcePort = layers.TCPPort(binary.BigEndian.Uint16(inner_ip.Payload[:2]))
+			//log.Println("Source port: ",sourcePort)
+			//log.Println("Destination Port:", tcp.DstPort)
+			// Add more fields as needed
+		} else {
+			// no tcp layer means not of interest to us!
+			//log.Println("No TCP layer found in the payload.")
+			return
+		}
+		// if we did not receive a syn ack and the source port is <= 65100 (which we use for all the syns we sent) add this to the
+		if !syn_ack_received && sourcePort >= 65000 && sourcePort < 65100 {
+			intValue := int(sourcePort)
+			hop := intValue - 65000
+			log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+
+		} else if syn_ack_received && dns_traceroute_port == sourcePort {
+			// we received an icmp packet and have already seen a syn ack and the sourcePort is equal to the dns traceroute port
+			// put data into second list
+			log.Println("[*] \t DNSTR Hop ", dns_traceroute_hop_counter, " ", ip.SrcIP)
+			traceroute_mutex.Lock()
+			dns_traceroute_hop_counter += 1
+			traceroute_mutex.Unlock()
+		}
 	} else {
 		tcp_layer := pkt.Layer(layers.LayerTypeTCP)
 		if tcp_layer == nil {
@@ -397,50 +358,82 @@ func handle_pkt(pkt gopacket.Packet) {
 			ACK: tcp.ACK,
 		}
 		if pkt.ApplicationLayer() == nil {
+			if tcpflags.is_SYN() {
+				// recevied a SYN packet whysoever!?
+				// we make sure to put it in our data queue
+				// check if item in map and assign value
+				log.Println("[*] Received unexpected SYN from ", ip.SrcIP)
+			} else
 			// SYN-ACK
 			if tcpflags.is_SYN_ACK() {
 				if debug {
 					log.Println("received SYN-ACK")
 				}
-				// check if item in map and assign value
-				scan_data.mu.Lock()
-				root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 1}]
-				scan_data.mu.Unlock()
-				if !ok {
-					return
-				}
-				last_data_item := root_data_item.last()
-				// this should not occur, this would be the case if a syn-ack is being received more than once
-				if last_data_item != root_data_item {
-					return
-				}
-				data := scan_data_item{
-					id:   last_data_item.id,
-					ts:   time.Now(),
-					port: tcp.DstPort,
-					seq:  tcp.Seq,
-					ack:  tcp.Ack,
-					ip:   ip.SrcIP,
-					flags: TCP_flags{
-						FIN: tcp.FIN,
-						SYN: tcp.SYN,
-						RST: tcp.RST,
-						PSH: tcp.PSH,
-						ACK: tcp.ACK,
-					},
-				}
-				last_data_item.Next = &data
-
-				limiter := rate.NewLimiter(rate.Every(10*time.Millisecond), 1)
-				for i := 1; i < 30; i++ {
-					//wg.Add(1)
-					r := limiter.Reserve()
-					if !r.OK() {
-						log.Println("[Sending PA with DNS] Rate limit exceeded")
-						break
+				if !syn_ack_received {
+					// first syn ack -> put into icmp queue
+					// we start dns traceroute only for the first packet!
+					// stop processing icmp packets with source port <= 65100
+					intValue := int(tcp.DstPort)
+					hop := intValue - 65000
+					log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+					log.Println("[*] Received SYN/ACK from ", ip.SrcIP)
+					log.Println("[*] Initializing DNS Traceroute to ", ip.SrcIP)
+					traceroute_mutex.Lock()
+					syn_ack_received = true
+					firstToSynAck = ip.SrcIP
+					// memorize the port we use for dns traceroute as it needs to stay constant to match the state
+					dns_traceroute_port = tcp.DstPort
+					traceroute_mutex.Unlock()
+					// check if item in map and assign value
+					dns_icmp_data.mu.Lock()
+					root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
+					dns_icmp_data.mu.Unlock()
+					if !ok {
+						return
 					}
-					time.Sleep(r.Delay())
-					send_ack_with_dns(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, uint8(i))
+					last_data_item := root_data_item.last()
+					// this should not occur, this would be the case if a syn-ack is being received more than once
+					if last_data_item != root_data_item {
+						return
+					}
+					data := scan_data_item{
+						id:   last_data_item.id,
+						ts:   time.Now(),
+						port: tcp.DstPort,
+						seq:  tcp.Seq,
+						ack:  tcp.Ack,
+						ip:   ip.SrcIP,
+						flags: TCP_flags{
+							FIN: tcp.FIN,
+							SYN: tcp.SYN,
+							RST: tcp.RST,
+							PSH: tcp.PSH,
+							ACK: tcp.ACK,
+						},
+					}
+					last_data_item.Next = &data
+
+					limiter := rate.NewLimiter(rate.Every(5*time.Millisecond), 1)
+					for i := 1; i < 30; i++ {
+						//wg.Add(1)
+						r := limiter.Reserve()
+						if !r.OK() {
+							log.Println("[Sending PA with DNS] Rate limit exceeded")
+							break
+						}
+						time.Sleep(r.Delay())
+						send_ack_with_dns(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, uint8(i))
+					}
+
+				} else {
+					if !(initialIP.Equal(ip.SrcIP)) && !(firstToSynAck.Equal(ip.SrcIP)) {
+						// received SA from IP that is different to initialIP and the IP addr. that sent first SA
+						intValue := int(tcp.DstPort)
+						hop := intValue - 65000
+						log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
+						log.Println("[*] Hop ", hop, " ", ip.SrcIP)
+					}
+
 				}
 
 			} else
@@ -449,9 +442,9 @@ func handle_pkt(pkt gopacket.Packet) {
 				if debug {
 					log.Println("received FIN-ACK")
 				}
-				scan_data.mu.Lock()
-				root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 2 - uint32(DNS_PAYLOAD_SIZE)}]
-				scan_data.mu.Unlock()
+				dns_icmp_data.mu.Lock()
+				root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
+				dns_icmp_data.mu.Unlock()
 				if !ok {
 					return
 				}
@@ -471,7 +464,9 @@ func handle_pkt(pkt gopacket.Packet) {
 					log.Println("ACKing FIN-ACK")
 				}
 				send_ack_pos_fin(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
-				write_chan <- root_data_item
+				waiting_to_end = true
+				time.Sleep(3 * time.Second)
+				close(stop_chan)
 			}
 		} else
 		// PSH-ACK || FIN-PSH-ACK == DNS Response
@@ -515,10 +510,11 @@ func handle_pkt(pkt gopacket.Packet) {
 			if debug {
 				log.Println("got DNS response")
 			}
+			log.Println("[*] Received DNS response from ", ip.SrcIP)
 			// check if item in map and assign value
-			scan_data.mu.Lock()
-			root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 1 - uint32(DNS_PAYLOAD_SIZE)}]
-			scan_data.mu.Unlock()
+			dns_icmp_data.mu.Lock()
+			root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
+			dns_icmp_data.mu.Unlock()
 			if !ok {
 				return
 			}
@@ -541,9 +537,7 @@ func handle_pkt(pkt gopacket.Packet) {
 			for _, answer := range answers {
 				if answer.IP != nil {
 					answers_ip = append(answers_ip, answer.IP)
-					if debug {
-						log.Println(answer.IP)
-					}
+					log.Println("[*] \t DNS answer: ", answer.IP)
 				} else {
 					if debug {
 						log.Println("non IP type found in answer")
@@ -568,13 +562,11 @@ func handle_pkt(pkt gopacket.Packet) {
 				dns_recs: answers_ip,
 			}
 			last_data_item.Next = &data
+			traceroute_mutex.Lock()
+			dns_reply_received = true
+			traceroute_mutex.Unlock()
 			// send FIN-ACK to server
 			send_ack_pos_fin(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, true)
-			// if this pkt is fin-psh-ack we will remove it from the map at this point already
-			// because we wont receive any further fin-ack from the server
-			if tcpflags.is_FIN_PSH_ACK() {
-				write_chan <- root_data_item
-			}
 		}
 	}
 }
@@ -602,12 +594,12 @@ func packet_capture(handle *pcapgo.EthernetHandle) {
 func send_syn(id uint32, dst_ip net.IP, ttl uint8) {
 	// generate sequence number based on the first 21 bits of the hash
 	seq := (id & 0x1FFFFF) * 2048
-	port := layers.TCPPort(((id & 0xFFE00000) >> 21) + 61440 + uint32(ttl))
+	port := layers.TCPPort(65000 + uint32(ttl))
 	if debug {
 		log.Println(dst_ip, "seq_num=", seq)
 	}
-	// check for sequence number collisions
-	scan_data.mu.Lock()
+
+	dns_icmp_data.mu.Lock()
 	s_d_item := scan_data_item{
 		id:   id,
 		ts:   time.Now(),
@@ -625,11 +617,8 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8) {
 		dns_recs: nil,
 		Next:     nil,
 	}
-	if debug {
-		log.Println("scan_data=", s_d_item)
-	}
-	scan_data.items[scan_item_key{port, seq}] = &s_d_item
-	scan_data.mu.Unlock()
+	dns_icmp_data.items[scan_item_key{port}] = &s_d_item
+	dns_icmp_data.mu.Unlock()
 
 	// === build packet ===
 	// Create ip layer
@@ -655,83 +644,6 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8) {
 	send_tcp_pkt(ip, tcp, nil)
 }
 
-type u32id struct {
-	mu sync.Mutex
-	id uint32
-}
-
-// id for saving to results file, synced between multiple init_tcp()
-var ip_loop_id u32id = u32id{
-	id: 0,
-}
-
-func get_next_id() uint32 {
-	ip_loop_id.mu.Lock()
-	defer ip_loop_id.mu.Unlock()
-	ip_loop_id.id += 1
-	return ip_loop_id.id
-}
-
-func init_tcp(port_min uint16, port_max uint16) {
-	defer wg.Done()
-	for {
-		select {
-		case dst_ip := <-ip_chan:
-			// check for if ip is excluded in the blocklist
-			should_exclude := false
-			for _, blocked_net := range blocked_nets {
-				if blocked_net.Contains(dst_ip) {
-					should_exclude = true
-					break
-				}
-			}
-			if should_exclude {
-				if debug {
-					log.Println("excluding ip:", dst_ip)
-				}
-				continue
-			}
-			id := get_next_id()
-			if debug {
-				log.Println("ip:", dst_ip, id)
-			}
-			send_syn(id, dst_ip, 0)
-		case <-stop_chan:
-			return
-		}
-	}
-}
-
-func read_ips_file(fname string) {
-	defer wg.Done()
-	file, err := os.Open(fname)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		ip_chan <- net.ParseIP(line)
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-	// wait some time to send out SYNs & handle the responses
-	// of the IPs just read
-	if debug {
-		log.Println("read all ips, waiting to end ...")
-	}
-	waiting_to_end = true
-	time.Sleep(10 * time.Second)
-	close(stop_chan)
-}
-
 func close_handle(handle *pcapgo.EthernetHandle) {
 	defer wg.Done()
 	<-stop_chan
@@ -754,53 +666,6 @@ func load_config() {
 	}
 }
 
-func write_to_log(msg string) {
-	logfile, err := os.OpenFile("run.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		panic(err)
-	}
-	defer logfile.Close()
-	logfile.WriteString(msg + "\n")
-}
-
-// Linear Congruential Generator
-// as described in https://stackoverflow.com/a/53551417
-type lcg_state struct {
-	value      int
-	offset     int
-	multiplier int
-	modulus    int
-	max        int
-	found      int
-}
-
-var lcg_ipv4 lcg_state
-
-func (lcg *lcg_state) init(stop int) {
-	// Seed range with a random integer.
-	lcg.value = rand.Intn(stop)
-	lcg.offset = rand.Intn(stop)*2 + 1                                  // Pick a random odd-valued offset.
-	lcg.multiplier = 4*(int(stop/4)) + 1                                // Pick a multiplier 1 greater than a multiple of 4
-	lcg.modulus = int(math.Pow(2, math.Ceil(math.Log2(float64(stop))))) // Pick a modulus just big enough to generate all numbers (power of 2)
-	lcg.found = 0                                                       // Track how many random numbers have been returned
-	lcg.max = stop
-}
-
-func (lcg *lcg_state) next() int {
-	for lcg.value >= lcg.max {
-		lcg.value = (lcg.value*lcg.multiplier + lcg.offset) % lcg.modulus
-	}
-	lcg.found += 1
-	value := lcg.value
-	// Calculate the next value in the sequence.
-	lcg.value = (lcg.value*lcg.multiplier + lcg.offset) % lcg.modulus
-	return value
-}
-
-func (lcg *lcg_state) has_next() bool {
-	return lcg.found < lcg.max
-}
-
 func ip42uint32(ip net.IP) uint32 {
 	return binary.BigEndian.Uint32(ip.To4())
 }
@@ -815,11 +680,8 @@ func main() {
 	// TODO run iptables command so that kernel doesnt send out RSTs
 	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 
-	// write start ts to log
-	write_to_log("START " + time.Now().UTC().String())
 	// command line args
 	if len(os.Args) < 1 {
-		write_to_log("END " + time.Now().UTC().String() + " arg not given")
 		if debug {
 			log.Println("ERR need IPv4 target address")
 		}
@@ -881,13 +743,12 @@ func main() {
 	}
 
 	// start packet capture as goroutine
-	wg.Add(4)
+	wg.Add(2)
 	go packet_capture(handle)
-	go write_results()
-	go timeout()
 
-	limiter := rate.NewLimiter(rate.Every(10*time.Millisecond), 1)
-
+	limiter := rate.NewLimiter(rate.Every(500*time.Millisecond), 1)
+	initialIP = netip
+	log.Println("[*] TCP Traceroute to ", netip)
 	for i := 1; i <= 30; i++ {
 		//wg.Add(1)
 		r := limiter.Reserve()
@@ -903,7 +764,6 @@ func main() {
 	if debug {
 		log.Println("all routines finished")
 	}
-	write_to_log("END " + time.Now().UTC().String())
 	if debug {
 		log.Println("program done")
 	}
