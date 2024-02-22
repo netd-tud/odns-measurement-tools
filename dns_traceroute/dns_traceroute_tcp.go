@@ -123,6 +123,8 @@ var dns_traceroute_hop_counter = 0
 var waiting_to_end = false
 
 var traceroute_mutex sync.Mutex
+var all_syns_sent = false
+var all_dns_packets_sent = false
 var syn_ack_received = false
 var dns_reply_received = false
 
@@ -209,7 +211,7 @@ func build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, 
 		SrcIP:    net.ParseIP(cfg.Iface_ip),
 		DstIP:    dst_ip,
 		Protocol: layers.IPProtocolTCP,
-		Id:       1,
+		Id:       65000+uint16(ttl),
 	}
 
 	// Create tcp layer
@@ -283,6 +285,7 @@ func send_ack_pos_fin(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ac
 
 func handle_pkt(pkt gopacket.Packet) {
 	var sourcePort layers.TCPPort
+	var inner_ip *layers.IPv4
 
 	ip_layer := pkt.Layer(layers.LayerTypeIPv4)
 	if ip_layer == nil {
@@ -316,7 +319,7 @@ func handle_pkt(pkt gopacket.Packet) {
 		packet := gopacket.NewPacket(payloadBytes, layers.LayerTypeIPv4, gopacket.Default)
 
 		if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-			inner_ip, _ := ipLayer.(*layers.IPv4)
+			inner_ip, _ = ipLayer.(*layers.IPv4)
 			// Decode source port (first 2 bytes)
 			sourcePort = layers.TCPPort(binary.BigEndian.Uint16(inner_ip.Payload[:2]))
 			//log.Println("Source port: ",sourcePort)
@@ -331,15 +334,25 @@ func handle_pkt(pkt gopacket.Packet) {
 		if !syn_ack_received && sourcePort >= 65000 && sourcePort < 65100 {
 			intValue := int(sourcePort)
 			hop := intValue - 65000
-			log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+			if initialIP.Equal(ip.SrcIP){
+				log.Println("\033[0;31m[*] \t Hop ", hop, " ", ip.SrcIP,"\033[0m")
+			}else{
+				log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+			}
 
 		} else if syn_ack_received && dns_traceroute_port == sourcePort {
 			// we received an icmp packet and have already seen a syn ack and the sourcePort is equal to the dns traceroute port
 			// put data into second list
-			log.Println("[*] \t DNSTR Hop ", dns_traceroute_hop_counter, " ", ip.SrcIP)
-			traceroute_mutex.Lock()
-			dns_traceroute_hop_counter += 1
-			traceroute_mutex.Unlock()
+			// to meet the TCP flow the TCP SrcPort remains unchanged when sending our DNS requesrt after receiving a Syn/Ack from a server 
+			// that means we cannot use the sourcePort extracted from the TCP header within the ICMP payload
+			// to overcome this issue we use a custom IP.Id value when sending the DNS request
+			// we set its value to 65000 + ttl (same as for tcp.SrcPort) and use it here as the hop value
+			
+			if initialIP.Equal(ip.SrcIP){
+				log.Println("\033[0;31m[*] \t DNSTR Hop ", inner_ip.Id-65000, " ", ip.SrcIP,"\033[0m")
+			}else{
+				log.Println("[*] \t DNSTR Hop ", inner_ip.Id-65000, " ", ip.SrcIP)
+			}
 		}
 	} else {
 		tcp_layer := pkt.Layer(layers.LayerTypeTCP)
@@ -375,9 +388,12 @@ func handle_pkt(pkt gopacket.Packet) {
 					// stop processing icmp packets with source port <= 65100
 					intValue := int(tcp.DstPort)
 					hop := intValue - 65000
-					log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+					if initialIP.Equal(ip.SrcIP){
+						log.Println("\033[0;31m[*] \t Hop ", hop, " ", ip.SrcIP,"\033[0m")
+					}else{
+						log.Println("[*] \t Hop ", hop, " ", ip.SrcIP)
+					}
 					log.Println("[*] Received SYN/ACK from ", ip.SrcIP)
-					log.Println("[*] Initializing DNS Traceroute to ", ip.SrcIP)
 					traceroute_mutex.Lock()
 					syn_ack_received = true
 					firstToSynAck = ip.SrcIP
@@ -391,6 +407,7 @@ func handle_pkt(pkt gopacket.Packet) {
 					if !ok {
 						return
 					}
+					log.Println("[*] Initializing DNS Traceroute to ", ip.SrcIP, " over ", root_data_item.ip)
 					last_data_item := root_data_item.last()
 					// this should not occur, this would be the case if a syn-ack is being received more than once
 					if last_data_item != root_data_item {
@@ -424,14 +441,17 @@ func handle_pkt(pkt gopacket.Packet) {
 						time.Sleep(r.Delay())
 						send_ack_with_dns(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, uint8(i))
 					}
+					traceroute_mutex.Lock()
+					all_dns_packets_sent = true
+					traceroute_mutex.Unlock()
 
 				} else {
 					if !(initialIP.Equal(ip.SrcIP)) && !(firstToSynAck.Equal(ip.SrcIP)) {
 						// received SA from IP that is different to initialIP and the IP addr. that sent first SA
 						intValue := int(tcp.DstPort)
 						hop := intValue - 65000
-						log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
 						log.Println("[*] Hop ", hop, " ", ip.SrcIP)
+						log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
 					}
 
 				}
@@ -489,6 +509,7 @@ func handle_pkt(pkt gopacket.Packet) {
 			// see build_ack_with_dns()
 			if len(tcp.LayerPayload()) <= 2 {
 				//TODO this could be the point where we handle the keep-alive pkt
+				log.Println("[*] Received PSH-ACK or FIN-PSH-ACK but no DNS response from ",ip.SrcIP)
 				return
 			}
 			// validate payload size
@@ -505,11 +526,23 @@ func handle_pkt(pkt gopacket.Packet) {
 				if debug {
 					log.Println("DNS not found")
 				}
+				log.Println("[*] Received PSH-ACK or FIN-PSH-ACK but no DNS response from", ip.SrcIP)
 				return
 			}
 			if debug {
 				log.Println("got DNS response")
 			}
+			// we can neither use the tcp.DstPort nor the IP.Id field when receiving a valid DNS response
+			// therefore we use the dns.ID field which we set in the same manner as the IP.Id and tcp.SrcPort/DstPort field
+			// 65000 + ttl
+			if initialIP.Equal(ip.SrcIP){
+				log.Println("\033[0;31m[*] \t DNSTR Hop ", dns.ID-65000, " ", ip.SrcIP,"\033[0m")
+			}else{
+				log.Println("[*] \t DNSTR Hop ", dns.ID-65000, " ", ip.SrcIP)
+			}
+			traceroute_mutex.Lock()
+			dns_traceroute_hop_counter += 1
+			traceroute_mutex.Unlock()
 			log.Println("[*] Received DNS response from ", ip.SrcIP)
 			// check if item in map and assign value
 			dns_icmp_data.mu.Lock()
@@ -628,9 +661,9 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8) {
 		SrcIP:    net.ParseIP(cfg.Iface_ip),
 		DstIP:    dst_ip,
 		Protocol: layers.IPProtocolTCP,
-		Id:       1,
+		Id:       65000+uint16(ttl),
 	}
-
+	//log.Println(ip.Id)
 	// Create tcp layer
 	tcp := layers.TCP{
 		SrcPort: port,
@@ -642,6 +675,38 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8) {
 	tcp.SetNetworkLayerForChecksum(&ip)
 
 	send_tcp_pkt(ip, tcp, nil)
+}
+
+// stop measurement if we've sent out all syn packets but still got no syn ack after 3 seconds
+// 1 second should be sufficient in theory, but as we may route to targets that are geographically far away we do not want to miss their responses
+// we also stop if we got a SYN ACK packet but no DNS response after three seconds of sending the last DNS packet
+func timeout() {
+	defer wg.Done()
+	for {
+		if all_syns_sent{
+			if !all_dns_packets_sent{
+				select {
+					case <-time.After(3 * time.Second):
+						if !syn_ack_received{
+							log.Println("[*] No target reached.")
+							close(stop_chan)
+						}
+					case <-stop_chan:
+						return
+				}
+			} else{
+				select {
+					case <-time.After(3 * time.Second):
+						if !dns_reply_received{
+							log.Println("[*] No DNS reply received.")
+							close(stop_chan)
+						}
+					case <-stop_chan:
+						return
+				}
+			}
+		}
+	}
 }
 
 func close_handle(handle *pcapgo.EthernetHandle) {
@@ -743,10 +808,10 @@ func main() {
 	}
 
 	// start packet capture as goroutine
-	wg.Add(2)
+	wg.Add(3)
 	go packet_capture(handle)
-
-	limiter := rate.NewLimiter(rate.Every(500*time.Millisecond), 1)
+	go timeout()
+	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
 	initialIP = netip
 	log.Println("[*] TCP Traceroute to ", netip)
 	for i := 1; i <= 30; i++ {
@@ -759,6 +824,10 @@ func main() {
 		time.Sleep(r.Delay())
 		send_syn(uint32(i), netip, uint8(i))
 	}
+	traceroute_mutex.Lock()
+	all_syns_sent = true
+	traceroute_mutex.Unlock()
+
 	go close_handle(handle)
 	wg.Wait()
 	if debug {
