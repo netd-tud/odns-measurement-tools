@@ -386,6 +386,16 @@ func handle_pkt(pkt gopacket.Packet) {
 					// first syn ack -> put into icmp queue
 					// we start dns traceroute only for the first packet!
 					// stop processing icmp packets with source port <= 65100
+					// check if item in map and assign value
+					dns_icmp_data.mu.Lock()
+					root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
+					dns_icmp_data.mu.Unlock()
+					if !ok {
+						// if not this can be an syn/ack from previous scan
+						// we ignore it
+						//log.Println("ignoring packet")
+						return
+					}
 					intValue := int(tcp.DstPort)
 					hop := intValue - 65000
 					if initialIP.Equal(ip.SrcIP){
@@ -400,17 +410,11 @@ func handle_pkt(pkt gopacket.Packet) {
 					// memorize the port we use for dns traceroute as it needs to stay constant to match the state
 					dns_traceroute_port = tcp.DstPort
 					traceroute_mutex.Unlock()
-					// check if item in map and assign value
-					dns_icmp_data.mu.Lock()
-					root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
-					dns_icmp_data.mu.Unlock()
-					if !ok {
-						return
-					}
 					log.Println("[*] Initializing DNS Traceroute to ", ip.SrcIP, " over ", root_data_item.ip)
 					last_data_item := root_data_item.last()
 					// this should not occur, this would be the case if a syn-ack is being received more than once
 					if last_data_item != root_data_item {
+						//log.Println("error2")
 						return
 					}
 					data := scan_data_item{
@@ -448,10 +452,12 @@ func handle_pkt(pkt gopacket.Packet) {
 				} else {
 					if !(initialIP.Equal(ip.SrcIP)) && !(firstToSynAck.Equal(ip.SrcIP)) {
 						// received SA from IP that is different to initialIP and the IP addr. that sent first SA
-						intValue := int(tcp.DstPort)
-						hop := intValue - 65000
-						log.Println("[*] Hop ", hop, " ", ip.SrcIP)
-						log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
+						//intValue := int(tcp.DstPort)
+						//hop := intValue - 65000
+						// we need to comment this out, otherwise we might see SynAcks from previous measurements 
+						//log.Println("[*] Hop ", hop, " ", ip.SrcIP)
+						//log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
+						return
 					}
 
 				}
@@ -811,7 +817,7 @@ func main() {
 	wg.Add(3)
 	go packet_capture(handle)
 	go timeout()
-	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
+	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
 	initialIP = netip
 	log.Println("[*] TCP Traceroute to ", netip)
 	for i := 1; i <= 30; i++ {
