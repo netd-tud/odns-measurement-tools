@@ -8,6 +8,39 @@ It comprises all ODNS components:
 
 Regular scan results are published under http://odns.secnow.net
 
+### Usage
+**Setup:**
+```
+cd dns_over_tcp
+cp config.yml.template config.yml
+```
+
+Then modify the `config.yml` accordingly (set your interface name and IP-address).
+
+Ensure kernel reset packets are disabled:
+
+```
+sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+```
+
+
+**Run the scan:**
+```
+sudo go run dns_over_tcp.go [net-to-scan-in-CIDR|filename-of-ip-list]
+```
+
+Results are written to `tcp_results.csv.gz`
+
+**Postprocessing:**
+
+Transform the data into a format useful for postprocessing:
+```
+python3 postproc_data_tcp_pure.py tcp_results.csv.gz
+```
+
+The resulting file will be named `tcp_results_combined.csv.gz`
+
+
 ## DNS Traceroute Tools
 These tools measure the path to and beyond transparent DNS forwarders. 
 ### DNS over TCP Traceroute
