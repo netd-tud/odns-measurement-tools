@@ -1,3 +1,4 @@
 config.yml
 *.csv.gz
 dns_traceroute
+run.log

@@ -27,10 +27,11 @@ import (
 	"golang.org/x/net/ipv4"
 
 	"github.com/breml/bpfutils"
+	"golang.org/x/time/rate"
 )
 
 const (
-	debug = false
+	debug = true
 )
 
 // config
@@ -42,6 +43,7 @@ type cfg_db struct {
 	Port_max       uint16 `yaml:"port_max"`
 	Dns_query      string `yaml:"dns_query"`
 	Excl_ips_fname string `yaml:"exclude_ips_fname"`
+	Pkts_per_sec   int    `yaml:"pkts_per_sec"`
 }
 
 var cfg cfg_db
@@ -55,6 +57,8 @@ var stop_chan = make(chan stop) // (〃・ω・〃)
 var ip_chan = make(chan net.IP, 1024)
 
 var blocked_nets []*net.IPNet = []*net.IPNet{}
+
+var send_limiter *rate.Limiter
 
 // a simple struct for all the tcp flags needed
 type TCP_flags struct {
@@ -658,6 +662,11 @@ func init_tcp(port_min uint16, port_max uint16) {
 			if debug {
 				log.Println("ip:", dst_ip, id)
 			}
+			r := send_limiter.Reserve()
+			if !r.OK() {
+				log.Println("Rate limit exceeded")
+			}
+			time.Sleep(r.Delay())
 			send_syn(id, dst_ip)
 		case <-stop_chan:
 			return
@@ -897,6 +906,7 @@ func main() {
 
 	load_config()
 	exclude_ips()
+	send_limiter = rate.NewLimiter(rate.Every(time.Duration(1000000/cfg.Pkts_per_sec)*time.Microsecond), 1)
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0)
 	DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
