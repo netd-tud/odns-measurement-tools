@@ -1,4 +1,4 @@
-module dns_over_tcp
+module dns_over_udp
 
 go 1.21.4
 

@@ -69,6 +69,7 @@ type scan_data_item struct {
 	id       uint32
 	ts       time.Time
 	ip       net.IP
+	answerip net.IP
 	port     layers.UDPPort
 	dnsid    uint16
 	dns_recs []net.IP
@@ -93,11 +94,13 @@ var scan_data root_scan_data = root_scan_data{
 var write_chan = make(chan *scan_data_item, 4096)
 
 func scan_item_to_strarr(scan_item *scan_data_item) []string {
+	//TODO align with format of dns_over_tcp
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.id)))
 	record = append(record, scan_item.ts.Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.ip.String())
+	record = append(record, scan_item.answerip.String())
 	record = append(record, scan_item.port.String())
 	record = append(record, strconv.Itoa((int)(scan_item.dnsid)))
 	dns_answers := ""
@@ -223,15 +226,7 @@ func build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) (layers.IPv
 
 	dns_buf := gopacket.NewSerializeBuffer()
 	gopacket.SerializeLayers(dns_buf, gopacket.SerializeOptions{}, &dns)
-	// prepend dns payload with its size, as gopacket does not do this automatically
-	dns_buf_bytes := dns_buf.Bytes()
-	dns_corrected := make([]byte, len(dns_buf_bytes)+2)
-	dns_corrected[0] = uint8(0)
-	dns_corrected[1] = uint8(len(dns_buf_bytes))
-	for i := 0; i < len(dns_buf_bytes); i++ {
-		dns_corrected[i+2] = dns_buf_bytes[i]
-	}
-	return ip, udp, dns_buf_bytes
+	return ip, udp, dns_buf.Bytes()
 }
 
 func send_dns(id uint32, dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) {
@@ -262,7 +257,7 @@ func handle_pkt(pkt gopacket.Packet) {
 	if ip_layer == nil {
 		return
 	}
-	_, ok := ip_layer.(*layers.IPv4)
+	ip, ok := ip_layer.(*layers.IPv4)
 	if !ok {
 		return
 	}
@@ -282,20 +277,6 @@ func handle_pkt(pkt gopacket.Packet) {
 		}
 		// decode as DNS Packet
 		dns := &layers.DNS{}
-		// remove the first two bytes of the payload, i.e. size of the dns response
-		// see build_dns()
-		/*if len(udp.LayerPayload()) <= 2 {
-			return
-		}
-		// validate payload size
-		pld_size := int(udp.LayerPayload()[0]) + int(udp.LayerPayload()[1])<<8
-		if pld_size == len(udp.LayerPayload())-2 {
-			return
-		}
-		pld := make([]byte, len(udp.LayerPayload())-2)
-		for i := 0; i < len(pld); i++ {
-			pld[i] = udp.LayerPayload()[i+2]
-		}*/
 		pld := udp.LayerPayload()
 		err := dns.DecodeFromBytes(pld, gopacket.NilDecodeFeedback)
 		if err != nil {
@@ -329,6 +310,7 @@ func handle_pkt(pkt gopacket.Packet) {
 				return
 			}
 		}
+		scan_item.answerip = ip.SrcIP
 		scan_item.dns_recs = answers_ip
 		// queue for writeout
 		write_chan <- scan_item
