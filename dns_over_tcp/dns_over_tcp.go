@@ -169,7 +169,7 @@ func scan_item_to_strarr(scan_item *scan_data_item) []string {
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.id)))
-	record = append(record, scan_item.ts.Format("2006-01-02 15:04:05.000000"))
+	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.ip.String())
 	record = append(record, scan_item.port.String())
 	record = append(record, strconv.Itoa(int(scan_item.seq)))
