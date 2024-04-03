@@ -308,7 +308,9 @@ func handle_pkt(pkt gopacket.Packet) {
 			log.Println("got DNS response")
 		}
 		// check if item in map and assign value
+		scan_data.mu.Lock()
 		scan_item, ok := scan_data.items[scan_item_key{udp.DstPort, dns.ID}]
+		scan_data.mu.Unlock()
 		if !ok {
 			return
 		}
