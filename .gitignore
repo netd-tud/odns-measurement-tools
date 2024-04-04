@@ -1,4 +1,5 @@
 config.yml
 *.csv.gz
+*.log
+*.pcap
 dns_traceroute
-run.log
