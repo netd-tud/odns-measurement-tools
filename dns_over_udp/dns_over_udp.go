@@ -97,13 +97,13 @@ var scan_data root_scan_data = root_scan_data{
 var write_chan = make(chan *scan_data_item, 4096)
 
 func scan_item_to_strarr(scan_item *scan_data_item) []string {
-	//TODO align with format of dns_over_tcp
+	// csv format: id;target_ip;response_ip;arecords;timestamp;port;dnsid
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.id)))
-	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.ip.String())
 	record = append(record, scan_item.answerip.String())
+	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.port.String())
 	record = append(record, strconv.Itoa((int)(scan_item.dnsid)))
 	dns_answers := ""
@@ -604,7 +604,8 @@ func bind_ports() {
 		})
 		if err != nil {
 			if debug {
-				log.Println("Could not bind to UDP port ", port)
+				log.Println("Could not bind to UDP port", port)
+				log.Println("reason:", err)
 			}
 			// TODO should then probably exclude these from the scan
 		} else {
