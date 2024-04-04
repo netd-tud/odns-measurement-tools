@@ -629,7 +629,7 @@ func main() {
 	// write start ts to log
 	write_to_log("START " + time.Now().UTC().String())
 	// command line args
-	if len(os.Args) < 1 {
+	if len(os.Args) < 2 {
 		write_to_log("END " + time.Now().UTC().String() + " arg not given")
 		if debug {
 			log.Println("ERR need filename or net in CIDR notation")
