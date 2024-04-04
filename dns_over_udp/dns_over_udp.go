@@ -64,6 +64,9 @@ var DNS_PAYLOAD_SIZE uint16
 
 var waiting_to_end = false
 
+// slice for sockets that will be bound on program start
+var bound_sockets = []*net.UDPConn{}
+
 // this struct contains all relevant data to track the dns query & response
 type scan_data_item struct {
 	id       uint32
@@ -519,11 +522,16 @@ func gen_ips(netip net.IP, hostsize int) {
 	netip_int := ip42uint32(netip)
 	lcg_ipv4.init(int(math.Pow(2, float64(hostsize))))
 	for lcg_ipv4.has_next() {
-		val := lcg_ipv4.next()
-		ip_chan <- uint322ip(netip_int + uint32(val))
+		select {
+		case <-stop_chan:
+			return
+		default:
+			val := lcg_ipv4.next()
+			ip_chan <- uint322ip(netip_int + uint32(val))
+		}
 	}
 	// wait some time to send out SYNs & handle the responses
-	// of the IPs just read before ending the program
+	// of the IPs just generated before ending the program
 	if debug {
 		log.Println("all ips generated, waiting to end ...")
 	}
@@ -578,6 +586,39 @@ func exclude_ips() {
 
 	if err := scanner.Err(); err != nil {
 		panic(err)
+	}
+}
+
+// binding all the sockets potentially in use by the scanner
+// so no icmp port unreachable is sent and no other application
+// may use these ports by chance
+func bind_ports() {
+	if debug {
+		log.Println("Binding ports")
+	}
+	var port uint32
+	for port = (uint32)(cfg.Port_min); port <= (uint32)(cfg.Port_max); port++ {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{
+			IP:   net.ParseIP(cfg.Iface_ip),
+			Port: (int)(port),
+		})
+		if err != nil {
+			if debug {
+				log.Println("Could not bind to UDP port ", port)
+			}
+			// TODO should then probably exclude these from the scan
+		} else {
+			bound_sockets = append(bound_sockets, conn)
+		}
+	}
+}
+
+func unbind_ports() {
+	if debug {
+		log.Println("Unbinding ports")
+	}
+	for _, sock := range bound_sockets {
+		sock.Close()
 	}
 }
 
@@ -637,6 +678,7 @@ func main() {
 
 	load_config()
 	exclude_ips()
+	bind_ports()
 	send_limiter = rate.NewLimiter(rate.Every(time.Duration(1000000/cfg.Pkts_per_sec)*time.Microsecond), 1)
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := build_dns(net.ParseIP("0.0.0.0"), 0, 0)
@@ -678,7 +720,7 @@ func main() {
 	go timeout()
 	if fname != "" {
 		if debug {
-			log.Println("running in filename mode")
+			log.Println("running in filename mode, this will not be randomized, the ips are probed as listed in the file")
 		}
 		go read_ips_file(fname)
 	} else {
@@ -693,6 +735,7 @@ func main() {
 	}
 	go close_handle(handle)
 	wg.Wait()
+	unbind_ports()
 	if debug {
 		log.Println("all routines finished")
 	}
