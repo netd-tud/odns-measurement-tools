@@ -39,8 +39,6 @@ type cfg_db struct {
 	Iface_name     string `yaml:"iface_name"`
 	Iface_ip       string `yaml:"iface_ip"`
 	Dst_port       uint16 `yaml:"dst_port"`
-	Port_min       uint16 `yaml:"port_min"`
-	Port_max       uint16 `yaml:"port_max"`
 	Dns_query      string `yaml:"dns_query"`
 	Excl_ips_fname string `yaml:"exclude_ips_fname"`
 	Pkts_per_sec   int    `yaml:"pkts_per_sec"`
@@ -639,7 +637,7 @@ func get_next_id() uint32 {
 	return ip_loop_id.id
 }
 
-func init_tcp(port_min uint16, port_max uint16) {
+func init_tcp() {
 	defer wg.Done()
 	for {
 		select {
@@ -788,8 +786,13 @@ func gen_ips(netip net.IP, hostsize int) {
 	netip_int := ip42uint32(netip)
 	lcg_ipv4.init(int(math.Pow(2, float64(hostsize))))
 	for lcg_ipv4.has_next() {
-		val := lcg_ipv4.next()
-		ip_chan <- uint322ip(netip_int + uint32(val))
+		select {
+		case <-stop_chan:
+			return
+		default:
+			val := lcg_ipv4.next()
+			ip_chan <- uint322ip(netip_int + uint32(val))
+		}
 	}
 	// wait some time to send out SYNs & handle the responses
 	// of the IPs just read before ending the program
@@ -911,8 +914,7 @@ func main() {
 	_, _, dns_payload := build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0)
 	DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
 	// start packet capture
-	handle, err := pcapgo.NewEthernetHandle(cfg.Iface_name) //pcap.OpenLive("wlp1s0", defaultSnapLen, true,
-	//pcap.BlockForever)
+	handle, err := pcapgo.NewEthernetHandle(cfg.Iface_name)
 	if err != nil {
 		panic(err)
 	}
@@ -959,7 +961,7 @@ func main() {
 	}
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go init_tcp(cfg.Port_min, cfg.Port_max)
+		go init_tcp()
 	}
 	go close_handle(handle)
 	wg.Wait()
