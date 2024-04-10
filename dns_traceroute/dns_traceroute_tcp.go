@@ -55,26 +55,26 @@ type TCP_flags struct {
 // 0: OFF, 1: ERR, 2: WARN, 3: INFO, 4: DEBUG, 5: VERBOSE, 6: ALL
 func println(lvl int, prefix interface{}, v ...any) {
 	if lvl <= cfg.Verbosity {
-		if prefix != "" {
-			u := []any{}
-			switch lvl {
-			case 1:
-				u = append(u, "ERR  ")
-			case 2:
-				u = append(u, "WARN ")
-			case 3:
-				u = append(u, "INFO ")
-			case 4:
-				fallthrough
-			case 5:
-				fallthrough
-			case 6:
-				u = append(u, "DEBUG")
-			}
-			u = append(u, "["+fmt.Sprintf("%v", prefix)+"]")
-			u = append(u, v)
-			v = u
+		u := []any{}
+		switch lvl {
+		case 1:
+			u = append(u, "ERR  ")
+		case 2:
+			u = append(u, "WARN ")
+		case 3:
+			u = append(u, "INFO ")
+		case 4:
+			fallthrough
+		case 5:
+			fallthrough
+		case 6:
+			u = append(u, "DEBUG")
 		}
+		if prefix != "" {
+			u = append(u, "["+fmt.Sprintf("%v", prefix)+"]")
+		}
+		u = append(u, v...)
+		v = u
 		log.Println(v...)
 	}
 }
@@ -154,18 +154,18 @@ type tracert_param struct {
 	dns_reply_received   int64
 	initial_ip           net.IP
 	first_to_syn_ack     net.IP
+	dns_traceroute_port  layers.TCPPort
 }
 
-func (param *tracert_param) zero() {
-	param.all_dns_packets_sent = false
-	param.all_syns_sent = false
-	param.syn_ack_received = -1
-	param.dns_reply_received = -1
+func (params *tracert_param) zero() {
+	params.all_dns_packets_sent = false
+	params.all_syns_sent = false
+	params.syn_ack_received = -1
+	params.dns_reply_received = -1
+	params.dns_traceroute_port = layers.TCPPort(10000)
 }
 
 var tracert_params = map[int]*tracert_param{}
-
-var dns_traceroute_port = layers.TCPPort(10000)
 
 var send_limiter *rate.Limiter
 
@@ -374,7 +374,7 @@ func handle_pkt(pkt gopacket.Packet) {
 				println(3, id_from_port(uint16(start_port)), "[*] \t Hop ", hop, " ", ip.SrcIP)
 			}
 
-		} else if params.syn_ack_received == 1 && dns_traceroute_port == source_port {
+		} else if params.syn_ack_received != -1 && params.dns_traceroute_port == source_port {
 			// we received an icmp packet and have already seen a syn ack and the sourcePort is equal to the dns traceroute port
 			// put data into second list
 			// to meet the TCP flow the TCP SrcPort remains unchanged when sending our DNS requesrt after receiving a Syn/Ack from a server
@@ -448,7 +448,7 @@ func handle_pkt(pkt gopacket.Packet) {
 					params.syn_ack_received = time.Now().Unix()
 					params.first_to_syn_ack = ip.SrcIP
 					// memorize the port we use for dns traceroute as it needs to stay constant to match the state
-					dns_traceroute_port = tcp.DstPort
+					params.dns_traceroute_port = tcp.DstPort
 					params.traceroute_mutex.Unlock()
 					println(4, id_from_port(uint16(start_port)), "[*] Initializing DNS Traceroute to ", ip.SrcIP, " over ", root_data_item.ip)
 					last_data_item := root_data_item.last()
@@ -650,7 +650,7 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8, start_port uint16) {
 	// generate sequence number based on the first 21 bits of the hash
 	seq := (id & 0x1FFFFF) * 2048
 	port := layers.TCPPort(start_port + uint16(ttl))
-	println(5, id_from_port(start_port), dst_ip, "seq_num=", seq)
+	println(5, id_from_port(start_port), "sending syn to", dst_ip, "with seq_num=", seq)
 
 	dns_icmp_data.mu.Lock()
 	s_d_item := scan_data_item{
@@ -710,7 +710,6 @@ func init_traceroute(start_port uint16) {
 	for {
 		select {
 		case netip := <-ip_chan:
-			println(3, id_from_port(start_port), "[*] TCP Traceroute to ", netip)
 			params, exists := tracert_params[(int)(start_port)]
 			if !exists {
 				params = &tracert_param{}
@@ -719,6 +718,8 @@ func init_traceroute(start_port uint16) {
 			params.active.Lock()
 			params.zero()
 			params.initial_ip = netip
+			println(3, id_from_port(start_port), "[*] TCP Traceroute to ", netip)
+			fmt.Printf("ADDR:%p\n", params)
 			for i := 1; i <= 30; i++ {
 				r := send_limiter.Reserve()
 				if !r.OK() {
@@ -752,9 +753,11 @@ func timeout() {
 							println(3, id_from_port(uint16(start_port)), "[*] No target reached.")
 							tracert.active.Unlock()
 						}
-					} else {
-						if tracert.dns_reply_received != -1 && time.Now().Unix()-tracert.dns_reply_received > 3 {
+					} else { // all dns packets sent
+						log.Println("all dns packets sent for", id_from_port(uint16(start_port)), "dns reply received at=", tracert.dns_reply_received)
+						if tracert.dns_reply_received == -1 && time.Now().Unix()-tracert.dns_reply_received > 3 {
 							println(3, id_from_port(uint16(start_port)), "[*] No DNS reply received.")
+							fmt.Printf("ADDR:%p\n", tracert)
 							tracert.active.Unlock()
 						}
 					}
@@ -828,6 +831,11 @@ func main() {
 	if netip != nil {
 		println(3, "", "single ip mode")
 		ip_chan <- netip
+		go func() {
+			waiting_to_end = true
+			time.Sleep(10 * time.Second)
+			close(stop_chan)
+		}()
 	} else {
 		println(3, "", "filename mode")
 		filename := os.Args[1]
