@@ -474,9 +474,8 @@ func handle_pkt(pkt gopacket.Packet) {
 					}
 					last_data_item.Next = &data
 
-					limiter := rate.NewLimiter(rate.Every(5*time.Millisecond), 1)
 					for i := 1; i < 30; i++ {
-						r := limiter.Reserve()
+						r := send_limiter.Reserve()
 						if !r.OK() {
 							println(1, id_from_port(uint16(start_port)), "[Sending PA with DNS] Rate limit exceeded")
 						}
@@ -497,9 +496,7 @@ func handle_pkt(pkt gopacket.Packet) {
 						//log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
 						return
 					}
-
 				}
-
 			} else
 			// FIN-ACK
 			if tcpflags.is_FIN_ACK() {
@@ -719,7 +716,6 @@ func init_traceroute(start_port uint16) {
 			params.zero()
 			params.initial_ip = netip
 			println(3, id_from_port(start_port), "[*] TCP Traceroute to ", netip)
-			fmt.Printf("ADDR:%p\n", params)
 			for i := 1; i <= 30; i++ {
 				r := send_limiter.Reserve()
 				if !r.OK() {
@@ -749,16 +745,16 @@ func timeout() {
 			for start_port, tracert := range tracert_params {
 				if tracert.all_syns_sent {
 					if !tracert.all_dns_packets_sent {
-						if tracert.syn_ack_received != -1 && time.Now().Unix()-tracert.syn_ack_received > 3 {
+						if tracert.syn_ack_received == -1 && time.Now().Unix()-tracert.syn_ack_received > 6 {
 							println(3, id_from_port(uint16(start_port)), "[*] No target reached.")
 							tracert.active.Unlock()
+							tracert.zero()
 						}
 					} else { // all dns packets sent
-						log.Println("all dns packets sent for", id_from_port(uint16(start_port)), "dns reply received at=", tracert.dns_reply_received)
-						if tracert.dns_reply_received == -1 && time.Now().Unix()-tracert.dns_reply_received > 3 {
+						if tracert.dns_reply_received == -1 && time.Now().Unix()-tracert.dns_reply_received > 6 {
 							println(3, id_from_port(uint16(start_port)), "[*] No DNS reply received.")
-							fmt.Printf("ADDR:%p\n", tracert)
 							tracert.active.Unlock()
+							tracert.zero()
 						}
 					}
 				}
@@ -833,7 +829,7 @@ func main() {
 		ip_chan <- netip
 		go func() {
 			waiting_to_end = true
-			time.Sleep(10 * time.Second)
+			time.Sleep(20 * time.Second)
 			close(stop_chan)
 		}()
 	} else {
