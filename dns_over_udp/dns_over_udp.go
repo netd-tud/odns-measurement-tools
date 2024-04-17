@@ -310,7 +310,7 @@ func handle_pkt(pkt gopacket.Packet) {
 				if debug {
 					log.Println("non IP type found in answer")
 				}
-				return
+				//return
 			}
 		}
 		scan_item.answerip = ip.SrcIP
