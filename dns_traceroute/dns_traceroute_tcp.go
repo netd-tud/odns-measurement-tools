@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -47,6 +50,15 @@ type stop struct{}
 
 var stop_chan = make(chan stop) // (〃・ω・〃)
 var ip_chan = make(chan net.IP, 1024)
+
+var DNS_PAYLOAD_SIZE uint16
+
+var waiting_to_end = false
+
+var lowest_port uint16 = 61024 // smallest multiple of 32 outside random port range
+var highest_port uint16
+
+var write_chan = make(chan *tracert_param, 256)
 
 // a simple struct for all the tcp flags needed
 type TCP_flags struct {
@@ -138,39 +150,6 @@ func (flags TCP_flags) is_FIN_PSH_ACK() bool {
 	})
 }
 
-var DNS_PAYLOAD_SIZE uint16
-
-var waiting_to_end = false
-
-var lowest_port uint16 = 61024 // smallest multiple of 32 outside random port range
-var highest_port uint16
-
-type tracert_param struct {
-	traceroute_mutex           sync.Mutex
-	all_syns_sent              bool
-	all_dns_packets_sent       bool
-	syn_ack_received           int64
-	dns_reply_received         int64
-	initial_ip                 net.IP
-	first_to_syn_ack           net.IP
-	dns_traceroute_port        layers.TCPPort
-	finished                   int64
-	dns_traceroute_hop_counter int
-}
-
-func (params *tracert_param) zero() {
-	params.all_dns_packets_sent = false
-	params.all_syns_sent = false
-	params.syn_ack_received = -1
-	params.dns_reply_received = -1
-	params.dns_traceroute_port = layers.TCPPort(0)
-	params.dns_traceroute_hop_counter = 0
-}
-
-var tracert_params = map[int]*tracert_param{}
-
-var send_limiter *rate.Limiter
-
 // this struct contains all relevant data to track the tcp connection
 type scan_data_item struct {
 	id       uint32
@@ -192,20 +171,51 @@ func (item *scan_data_item) last() *scan_data_item {
 	return cur
 }
 
-// key for the map below
 type scan_item_key struct {
 	port layers.TCPPort
 }
 
-// map to track tcp connections, key is a port
-type root_scan_data struct {
-	mu    sync.Mutex
-	items map[scan_item_key]*scan_data_item
+type tracert_param struct {
+	traceroute_mutex           sync.Mutex
+	all_syns_sent              bool
+	all_dns_packets_sent       bool
+	syn_ack_received           int64
+	dns_reply_received         int64
+	initial_ip                 net.IP
+	first_to_syn_ack           net.IP
+	dns_traceroute_port        layers.TCPPort
+	finished                   int64
+	dns_traceroute_hop_counter int
+	root_data                  map[scan_item_key]*scan_data_item
+	written                    bool
 }
 
-var dns_icmp_data root_scan_data = root_scan_data{
-	items: make(map[scan_item_key]*scan_data_item),
+func (params *tracert_param) zero() {
+	params.all_dns_packets_sent = false
+	params.all_syns_sent = false
+	params.syn_ack_received = -1
+	params.dns_reply_received = -1
+	params.finished = -1
+	params.dns_traceroute_port = layers.TCPPort(0)
+	params.dns_traceroute_hop_counter = 0
+	params.root_data = make(map[scan_item_key]*scan_data_item)
+	params.written = false
 }
+
+func (params *tracert_param) add_data_item(port layers.TCPPort, item_to_add *scan_data_item) {
+	key := scan_item_key{port: port}
+	root_data_item, exists := params.root_data[key]
+	if !exists {
+		root_data_item = item_to_add
+		params.root_data[key] = root_data_item
+	} else {
+		root_data_item.last().Next = item_to_add
+	}
+}
+
+var tracert_params = map[int]*tracert_param{}
+
+var send_limiter *rate.Limiter
 
 var opts gopacket.SerializeOptions = gopacket.SerializeOptions{
 	ComputeChecksums: true,
@@ -310,6 +320,29 @@ func send_ack_pos_fin(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ac
 		Seq:     ack_num,
 		Ack:     seq_num + 1,
 		Window:  8192,
+	}
+	tcp.SetNetworkLayerForChecksum(&ip)
+	send_tcp_pkt(ip, tcp, nil)
+}
+
+func send_rst(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) {
+	// === build packet ===
+	// Create ip layer
+	ip := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    net.ParseIP(cfg.Iface_ip),
+		DstIP:    dst_ip,
+		Protocol: layers.IPProtocolTCP,
+		Id:       1,
+	}
+
+	// Create tcp layer
+	tcp := layers.TCP{
+		SrcPort: src_port,
+		DstPort: layers.TCPPort(cfg.Dst_port),
+		RST:     true,
+		Seq:     ack_num,
 	}
 	tcp.SetNetworkLayerForChecksum(&ip)
 	send_tcp_pkt(ip, tcp, nil)
@@ -423,23 +456,20 @@ func handle_pkt(pkt gopacket.Packet) {
 			} else
 			// SYN-ACK
 			if tcpflags.is_SYN_ACK() {
-				println(5, id_from_port(uint16(start_port)), "received SYN-ACK")
+				println(5, id_from_port(uint16(start_port)), "received SYN-ACK from", ip.SrcIP, "to port", tcp.DstPort)
 				if params.syn_ack_received == -1 {
 					// first syn ack -> put into icmp queue
 					// we start dns traceroute only for the first packet!
 					// stop processing icmp packets with source port <= 65100
 					// check if item in map and assign value
-					dns_icmp_data.mu.Lock()
-					root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
-					dns_icmp_data.mu.Unlock()
+					root_data_item, ok := params.root_data[scan_item_key{port: tcp.DstPort}]
 					if !ok {
 						// if not this can be an syn/ack from previous scan
 						// we ignore it
 						//log.Println("ignoring packet")
 						return
 					}
-					intValue := int(tcp.DstPort)
-					hop := intValue - start_port
+					hop := int(tcp.DstPort) - start_port
 					if params.initial_ip.Equal(ip.SrcIP) {
 						println(3, id_from_port(uint16(start_port)), "\033[0;31m[*] \t Hop ", hop, " ", ip.SrcIP, "\033[0m")
 					} else {
@@ -487,6 +517,9 @@ func handle_pkt(pkt gopacket.Packet) {
 							println(1, id_from_port(uint16(start_port)), "[Sending PA with DNS] Rate limit exceeded")
 						}
 						time.Sleep(r.Delay())
+						if params.dns_reply_received != -1 {
+							break
+						}
 						send_ack_with_dns(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, uint8(i))
 					}
 					params.traceroute_mutex.Lock()
@@ -503,19 +536,21 @@ func handle_pkt(pkt gopacket.Packet) {
 						//log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
 						return
 					}
+					println(5, id_from_port(uint16(start_port)), "responding with reset to", params.initial_ip, "and port", tcp.DstPort)
+					//send_rst(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack)
+					send_ack_pos_fin(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
+					send_ack_pos_fin(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack, true)
 				}
 			} else
 			// FIN-ACK
 			if tcpflags.is_FIN_ACK() {
 				println(5, id_from_port(uint16(start_port)), "received FIN-ACK")
-				dns_icmp_data.mu.Lock()
-				root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
-				dns_icmp_data.mu.Unlock()
+				root_data_item, ok := params.root_data[scan_item_key{port: tcp.DstPort}]
 				if !ok {
 					return
 				}
 
-				last_data_item := root_data_item.last()
+				/*last_data_item := root_data_item.last()
 				if !(last_data_item.flags.is_PSH_ACK()) {
 					println(4, id_from_port(uint16(start_port)), "missing PSH-ACK, dropping")
 					// to do this properly in theory, we would also need to send a FIN-ACK back to the server here,
@@ -523,11 +558,12 @@ func handle_pkt(pkt gopacket.Packet) {
 					send_ack_pos_fin(ip.SrcIP, tcp.DstPort, tcp.Seq, tcp.Ack, true)
 					// TODO now we could check if the correct key ACK-(1+DNS_PAYLOAD_SIZE) exists and remove that one from the dictionary
 					return
-				}
+				}*/
 				println(5, id_from_port(uint16(start_port)), "ACKing FIN-ACK")
 				send_ack_pos_fin(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
 				params.traceroute_mutex.Lock()
 				params.finished = time.Now().Unix()
+				write_chan <- params
 				params.traceroute_mutex.Unlock()
 			}
 		} else
@@ -580,9 +616,7 @@ func handle_pkt(pkt gopacket.Packet) {
 			params.traceroute_mutex.Unlock()
 			println(3, id_from_port(uint16(start_port)), "[*] Received DNS response from ", ip.SrcIP)
 			// check if item in map and assign value
-			dns_icmp_data.mu.Lock()
-			root_data_item, ok := dns_icmp_data.items[scan_item_key{tcp.DstPort}]
-			dns_icmp_data.mu.Unlock()
+			root_data_item, ok := params.root_data[scan_item_key{port: tcp.DstPort}]
 			if !ok {
 				return
 			}
@@ -653,12 +687,16 @@ func packet_capture(handle *pcapgo.EthernetHandle) {
 start_port must be a multiple of 32
 */
 func send_syn(id uint32, dst_ip net.IP, ttl uint8, start_port uint16) {
-	// generate sequence number based on the first 21 bits of the hash
+	// generate sequence number based on the first 21 bits of id
 	seq := (id & 0x1FFFFF) * 2048
 	port := layers.TCPPort(start_port + uint16(ttl))
 	println(5, id_from_port(start_port), "sending syn to", dst_ip, "with seq_num=", seq)
 
-	dns_icmp_data.mu.Lock()
+	params, ok := tracert_params[int(start_port)]
+	if !ok {
+		println(1, nil, "params object not present for start_port:", start_port)
+		return
+	}
 	s_d_item := scan_data_item{
 		id:   id,
 		ts:   time.Now(),
@@ -676,8 +714,9 @@ func send_syn(id uint32, dst_ip net.IP, ttl uint8, start_port uint16) {
 		dns_recs: nil,
 		Next:     nil,
 	}
-	dns_icmp_data.items[scan_item_key{port}] = &s_d_item
-	dns_icmp_data.mu.Unlock()
+	params.traceroute_mutex.Lock()
+	params.add_data_item(port, &s_d_item)
+	params.traceroute_mutex.Unlock()
 
 	// === build packet ===
 	// Create ip layer
@@ -721,7 +760,7 @@ func init_traceroute(start_port uint16) {
 				params = &tracert_param{}
 				tracert_params[(int)(start_port)] = params
 			}
-			for exists && (params.finished == 0 || time.Now().Unix()-params.finished < int64(cfg.Port_reuse_timeout)) {
+			for exists && params.written && (params.finished == 0 || time.Now().Unix()-params.finished < int64(cfg.Port_reuse_timeout)) {
 				time.Sleep(1 * time.Second)
 			}
 			params.traceroute_mutex.Lock()
@@ -735,6 +774,9 @@ func init_traceroute(start_port uint16) {
 					println(1, id_from_port(start_port), "[Initial SYN] Rate limit exceeded")
 				}
 				time.Sleep(r.Delay())
+				if params.syn_ack_received != -1 {
+					break
+				}
 				send_syn(uint32(i), netip, uint8(i), start_port)
 			}
 			params.traceroute_mutex.Lock()
@@ -765,6 +807,7 @@ func timeout() {
 							println(3, id_from_port(uint16(start_port)), "[*] No target reached.")
 							params.traceroute_mutex.Lock()
 							params.finished = time.Now().Unix()
+							write_chan <- params
 							params.traceroute_mutex.Unlock()
 						}
 					} else { // all dns packets sent
@@ -772,6 +815,7 @@ func timeout() {
 							println(3, id_from_port(uint16(start_port)), "[*] No DNS reply received.")
 							params.traceroute_mutex.Lock()
 							params.finished = time.Now().Unix()
+							write_chan <- params
 							params.traceroute_mutex.Unlock()
 						}
 					}
@@ -830,6 +874,47 @@ func load_config() {
 		panic(err)
 	}
 	println(6, "", "config:", cfg)
+}
+
+func params_to_strarr(params *tracert_param) []string {
+	var record []string
+	//TODO
+	return record
+}
+
+func write_results() {
+	defer wg.Done()
+	data_folder := "traceroute_data"
+	err := os.MkdirAll(data_folder, os.ModePerm)
+	if err != nil {
+		println(1, nil, "could not create output directory")
+	}
+	for {
+		select {
+		case params := <-write_chan:
+			println(3, "writeout", "writing results for", params.initial_ip.String())
+			filepath := filepath.Join(data_folder, params.initial_ip.String()+".csv.gz")
+			csvfile, err := os.Create(filepath)
+			if err != nil {
+				panic(err)
+			}
+			defer csvfile.Close()
+
+			zip_writer := gzip.NewWriter(csvfile)
+			defer zip_writer.Close()
+
+			writer := csv.NewWriter(zip_writer)
+			writer.Comma = ';'
+			defer writer.Flush()
+
+			writer.Write(params_to_strarr(params))
+			params.traceroute_mutex.Lock()
+			params.written = true
+			params.traceroute_mutex.Unlock()
+		case <-stop_chan:
+			return
+		}
+	}
 }
 
 func main() {
@@ -906,10 +991,11 @@ func main() {
 	}
 
 	// start packet capture as goroutine
-	wg.Add(3)
+	wg.Add(4)
 	go packet_capture(handle)
 	time.Sleep(100 * time.Millisecond)
 	go timeout()
+	go write_results()
 	var i uint16 = 0
 	var number_routines uint16 = 10
 	highest_port = lowest_port + 32*number_routines
