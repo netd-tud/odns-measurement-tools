@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	debug = true
+	debug = false
 )
 
 // config
@@ -103,9 +103,6 @@ func scan_item_to_strarr(scan_item *scan_data_item) []string {
 	record = append(record, strconv.Itoa(int(scan_item.id)))
 	record = append(record, scan_item.ip.String())
 	record = append(record, scan_item.answerip.String())
-	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
-	record = append(record, scan_item.port.String())
-	record = append(record, strconv.Itoa((int)(scan_item.dnsid)))
 	dns_answers := ""
 	for i, dns_ip := range scan_item.dns_recs {
 		dns_answers += dns_ip.String()
@@ -114,6 +111,9 @@ func scan_item_to_strarr(scan_item *scan_data_item) []string {
 		}
 	}
 	record = append(record, dns_answers)
+	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
+	record = append(record, scan_item.port.String())
+	record = append(record, strconv.Itoa((int)(scan_item.dnsid)))
 	return record
 }
 
@@ -245,6 +245,7 @@ func send_dns(id uint32, dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) {
 		ip:       dst_ip,
 		port:     src_port,
 		dns_recs: nil,
+		dnsid:    dnsid,
 	}
 	if debug {
 		log.Println("scan_data=", s_d_item)
