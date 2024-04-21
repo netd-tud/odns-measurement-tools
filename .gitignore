@@ -2,4 +2,4 @@ config.yml
 *.csv.gz
 *.log
 *.pcap
-dns_traceroute
+traceroute_data
