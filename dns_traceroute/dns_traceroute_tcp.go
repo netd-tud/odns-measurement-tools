@@ -2,16 +2,16 @@ package main
 
 import (
 	"bufio"
-	"compress/gzip"
 	"encoding/binary"
-	"encoding/csv"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -358,11 +358,13 @@ func handle_pkt(pkt gopacket.Packet) {
 			} else {
 				println(3, id_from_port(uint16(start_port)), "[*] \t Hop ", hop, " ", ip.SrcIP)
 			}
+			params.traceroute_mutex.Lock()
 			params.syntr_hops = append(params.syntr_hops, tracert_hop{
 				hop_count:   hop,
 				ts:          time.Now().UTC(),
 				response_ip: ip.SrcIP,
 			})
+			params.traceroute_mutex.Unlock()
 
 		} else if params.syn_ack_received != -1 && params.dns_traceroute_port == source_port {
 			// we received an icmp packet and have already seen a syn ack and the sourcePort is equal to the dns traceroute port
@@ -378,11 +380,13 @@ func handle_pkt(pkt gopacket.Packet) {
 			} else {
 				println(3, id_from_port(uint16(start_port)), "[*] \t DNSTR Hop ", hop, " ", ip.SrcIP)
 			}
-			params.dnstr_hops = append(params.syntr_hops, tracert_hop{
+			params.traceroute_mutex.Lock()
+			params.dnstr_hops = append(params.dnstr_hops, tracert_hop{
 				hop_count:   int(hop),
 				ts:          time.Now().UTC(),
 				response_ip: ip.SrcIP,
 			})
+			params.traceroute_mutex.Unlock()
 		}
 	} else {
 		tcp_layer := pkt.Layer(layers.LayerTypeTCP)
@@ -429,6 +433,11 @@ func handle_pkt(pkt gopacket.Packet) {
 					}
 					println(3, id_from_port(uint16(start_port)), "[*] Received SYN/ACK from ", ip.SrcIP)
 					params.traceroute_mutex.Lock()
+					params.syntr_hops = append(params.syntr_hops, tracert_hop{
+						hop_count:   hop,
+						ts:          time.Now().UTC(),
+						response_ip: ip.SrcIP,
+					})
 					params.syn_ack_received = time.Now().Unix()
 					params.first_to_syn_ack = ip.SrcIP
 					// memorize the port we use for dns traceroute as it needs to stay constant to match the state
@@ -466,7 +475,7 @@ func handle_pkt(pkt gopacket.Packet) {
 						//log.Println("[*] Received another SYN/ACK from ", ip.SrcIP)
 						return
 					}
-					println(5, id_from_port(uint16(start_port)), "responding with reset to", params.initial_ip, "and port", tcp.DstPort)
+					println(5, id_from_port(uint16(start_port)), "responding with ack and fin-ack to", params.initial_ip, "and port", tcp.DstPort)
 					//send_rst(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack)
 					send_ack_pos_fin(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
 					send_ack_pos_fin(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack, true)
@@ -517,11 +526,19 @@ func handle_pkt(pkt gopacket.Packet) {
 			println(5, id_from_port(uint16(start_port)), "got DNS response")
 			// we can neither use the tcp.DstPort nor the IP.Id field when receiving a valid DNS response
 			// therefore we use the dns.ID field which we set in the same manner as the IP.Id and tcp.SrcPort/DstPort field
+			hop := dns.ID - uint16(start_port)
 			if params.initial_ip.Equal(ip.SrcIP) {
-				println(3, id_from_port(uint16(start_port)), "\033[0;31m[*] \t DNSTR Hop ", dns.ID-uint16(start_port), " ", ip.SrcIP, "\033[0m")
+				println(3, id_from_port(uint16(start_port)), "\033[0;31m[*] \t DNSTR Hop ", hop, " ", ip.SrcIP, "\033[0m")
 			} else {
-				println(3, id_from_port(uint16(start_port)), "[*] \t DNSTR Hop ", dns.ID-uint16(start_port), " ", ip.SrcIP)
+				println(3, id_from_port(uint16(start_port)), "[*] \t DNSTR Hop ", hop, " ", ip.SrcIP)
 			}
+			params.traceroute_mutex.Lock()
+			params.dnstr_hops = append(params.dnstr_hops, tracert_hop{
+				hop_count:   int(hop),
+				ts:          time.Now().UTC(),
+				response_ip: ip.SrcIP,
+			})
+			params.traceroute_mutex.Unlock()
 			println(3, id_from_port(uint16(start_port)), "[*] Received DNS response from ", ip.SrcIP)
 			// check for correct port
 			if tcp.DstPort != params.dns_traceroute_port {
@@ -542,7 +559,7 @@ func handle_pkt(pkt gopacket.Packet) {
 					println(3, id_from_port(uint16(start_port)), "[*] \t DNS answer: ", answer.IP)
 				} else {
 					println(5, id_from_port(uint16(start_port)), "non IP type found in answer")
-					// return
+					//return
 				}
 			}
 			params.traceroute_mutex.Lock()
@@ -752,9 +769,13 @@ func (params *tracert_param) str_dns_answers() []string {
 			dns_answers_str += ","
 		}
 	}
-	dns_slice := []string{"DNSANS", dns_answers_str}
-	println(6, "str_dns_answers", "dns_answers:", params.dns_answers, "dns_answers_str:", dns_answers_str, "slice:", dns_slice)
+	dns_slice := []string{"DNSANS", "", "", dns_answers_str}
+	println(6, "str_dns_answers", "dns_answers slice:", dns_slice)
 	return dns_slice
+}
+
+func tocsv_line(str_slice []string) string {
+	return strings.Join(str_slice[:], ";") + "\n"
 }
 
 func write_results() {
@@ -770,19 +791,12 @@ func write_results() {
 		select {
 		case params := <-write_chan:
 			println(3, "writeout", "writing results for", params.initial_ip.String())
-			filepath := filepath.Join(save_path, params.initial_ip.String()+".csv.gz")
+			filepath := filepath.Join(save_path, params.initial_ip.String()+".csv")
 			csvfile, err := os.Create(filepath)
 			if err != nil {
 				panic(err)
 			}
 			defer csvfile.Close()
-
-			zip_writer := gzip.NewWriter(csvfile)
-			defer zip_writer.Close()
-
-			writer := csv.NewWriter(zip_writer)
-			writer.Comma = ';'
-			defer writer.Flush()
 
 			// format:
 			// 1st field = tag: <SYNTR|DNSTR|DNSANS>
@@ -791,12 +805,13 @@ func write_results() {
 			// DNSANS;ANSWERIP1,ANSWERIP2
 			//writer.Write(params_to_strarr(params))
 			for _, syntrhop := range params.syntr_hops {
-				writer.Write([]string{"SYNTR", syntrhop.ts.Format("2006-01-02 15:04:05.000000"), strconv.Itoa(syntrhop.hop_count), syntrhop.response_ip.String()})
+				csvfile.WriteString(tocsv_line([]string{"SYNTR", syntrhop.ts.Format("2006-01-02 15:04:05.000000"), strconv.Itoa(syntrhop.hop_count), syntrhop.response_ip.String()}))
 			}
 			for _, dnstrhop := range params.dnstr_hops {
-				writer.Write([]string{"DNSTR", dnstrhop.ts.Format("2006-01-02 15:04:05.000000"), strconv.Itoa(dnstrhop.hop_count), dnstrhop.response_ip.String()})
+				csvfile.WriteString(tocsv_line([]string{"DNSTR", dnstrhop.ts.Format("2006-01-02 15:04:05.000000"), strconv.Itoa(dnstrhop.hop_count), dnstrhop.response_ip.String()}))
 			}
-			writer.Write(params.str_dns_answers())
+			dns_slice := params.str_dns_answers()
+			csvfile.WriteString(tocsv_line(dns_slice))
 			params.traceroute_mutex.Lock()
 			params.written = true
 			params.traceroute_mutex.Unlock()
@@ -809,6 +824,9 @@ func write_results() {
 func main() {
 	// TODO run iptables command so that kernel doesnt send out RSTs
 	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+
+	cur_usr, _ := user.Current()
+	println(0, nil, "Current User UID:", cur_usr.Uid)
 
 	// command line args
 	if len(os.Args) < 1 {
