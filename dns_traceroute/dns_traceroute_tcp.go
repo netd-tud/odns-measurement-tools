@@ -178,15 +178,17 @@ func (params *tracert_param) zero() {
 	params.all_syns_sent = false
 	params.syn_ack_received = -1
 	params.dns_reply_received = -1
+	params.written = false
 	params.finished = -1
 	params.dns_traceroute_port = layers.TCPPort(0)
-	params.written = false
 	params.syntr_hops = []tracert_hop{}
 	params.dnstr_hops = []tracert_hop{}
 	params.dns_answers = []net.IP{}
+	params.initial_ip = nil
 }
 
 var tracert_params = map[int]*tracert_param{}
+var tracert_mutex sync.Mutex
 
 var send_limiter *rate.Limiter
 
@@ -640,13 +642,17 @@ func init_traceroute(start_port uint16) {
 	for {
 		select {
 		case netip := <-ip_chan:
+			tracert_mutex.Lock()
 			params, exists := tracert_params[(int)(start_port)]
 			if !exists {
 				params = &tracert_param{}
 				tracert_params[(int)(start_port)] = params
+				params.finished = -1
 			}
-			for exists && params.written && (params.finished == 0 || time.Now().Unix()-params.finished < int64(cfg.Port_reuse_timeout)) {
-				time.Sleep(1 * time.Second)
+			tracert_mutex.Unlock()
+			for params.initial_ip != nil && (!params.written || params.finished == -1 || time.Now().Unix()-params.finished < int64(cfg.Port_reuse_timeout)) {
+				println(6, id_from_port(start_port), "waiting until port is available again,", int64(cfg.Port_reuse_timeout)-time.Now().Unix()+params.finished, "s remaining")
+				time.Sleep(5 * time.Second)
 			}
 			params.traceroute_mutex.Lock()
 			params.zero()
@@ -827,7 +833,7 @@ func main() {
 
 	cur_usr, _ := user.Current()
 	println(0, nil, "Current User UID:", cur_usr.Uid)
-
+	load_config()
 	// command line args
 	if len(os.Args) < 1 {
 		println(0, "", "ERR need IPv4 target address or filename")
@@ -862,7 +868,6 @@ func main() {
 		}
 	}()
 
-	load_config()
 	send_limiter = rate.NewLimiter(rate.Every(time.Duration(1000000/cfg.Pkts_per_sec)*time.Microsecond), 1)
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0, 0)
@@ -904,7 +909,7 @@ func main() {
 	go timeout()
 	go write_results()
 	var i uint16 = 0
-	var number_routines uint16 = 10
+	var number_routines uint16 = 1
 	highest_port = lowest_port + 32*number_routines
 	println(3, nil, "lowest port:", lowest_port)
 	println(3, nil, "highest port:", highest_port)
