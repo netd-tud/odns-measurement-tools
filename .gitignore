@@ -3,3 +3,5 @@ config.yml
 *.log
 *.pcap
 traceroute_data
+run.elf
+.vscode/launch.json
