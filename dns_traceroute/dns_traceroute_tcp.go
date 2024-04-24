@@ -40,6 +40,7 @@ type cfg_db struct {
 	Pkts_per_sec       int    `yaml:"pkts_per_sec"`
 	Verbosity          int    `yaml:"verbosity"`
 	Port_reuse_timeout int    `yaml:"port_reuse_timeout"`
+	Number_routines    uint16 `yaml:"no_of_routines"`
 }
 
 var cfg cfg_db
@@ -909,11 +910,10 @@ func main() {
 	go timeout()
 	go write_results()
 	var i uint16 = 0
-	var number_routines uint16 = 1
-	highest_port = lowest_port + 32*number_routines
+	highest_port = lowest_port + 32*cfg.Number_routines
 	println(3, nil, "lowest port:", lowest_port)
 	println(3, nil, "highest port:", highest_port)
-	for ; i < number_routines; i++ {
+	for ; i < cfg.Number_routines; i++ {
 		wg.Add(1)
 		go init_traceroute(uint16(lowest_port) + 32*i)
 	}
