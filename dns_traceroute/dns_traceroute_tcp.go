@@ -487,15 +487,14 @@ func handle_pkt(pkt gopacket.Packet) {
 			// FIN-ACK
 			if tcpflags.is_FIN_ACK() {
 				println(5, id_from_port(uint16(start_port)), "received FIN-ACK from", ip.SrcIP, "to port", tcp.DstPort)
-				/*if tcp.DstPort != params.dns_traceroute_port {
-					return
-				}*/
 				println(5, id_from_port(uint16(start_port)), "ACKing FIN-ACK")
 				send_ack_pos_fin(params.initial_ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
-				params.traceroute_mutex.Lock()
-				params.finished = time.Now().Unix()
-				write_chan <- params
-				params.traceroute_mutex.Unlock()
+				if tcp.DstPort == params.dns_traceroute_port {
+					params.traceroute_mutex.Lock()
+					params.finished = time.Now().Unix()
+					write_chan <- params
+					params.traceroute_mutex.Unlock()
+				}
 			}
 		} else
 		// PSH-ACK || FIN-PSH-ACK == DNS Response
