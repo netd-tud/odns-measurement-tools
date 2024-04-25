@@ -72,5 +72,5 @@ As soon as a SYN/ACK arrives, the tool starts to send DNS requests over TCP with
 
 **Usage**
 ```
-sudo go run dns_traceroute_tcp.go [target-ip]
+sudo go run dns_traceroute_tcp.go [target-ip|path-to-list-of-ips]
 ```
