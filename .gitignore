@@ -5,3 +5,6 @@ config.yml
 traceroute_data
 run.elf
 .vscode/launch.json
+.venv/
+*.csv
+__pycache__/
