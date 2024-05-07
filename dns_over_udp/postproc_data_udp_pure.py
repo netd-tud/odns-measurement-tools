@@ -70,9 +70,9 @@ class WorkerProcess(Process):
         # there should be two entries, one of them the control ip
         if len(arecs) != 2 or "91.216.216.216" not in arecs:
             return
-        arecord = arecs[0] if arecs[1]=="91.216.216.216" else arecs[1]
+        arecord = ip_address(arecs[0] if arecs[1]=="91.216.216.216" else arecs[1])
         outitem = output_df[(csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))]
-        outitem.response_ip = csv_split[InPos.SIP.value]
+        outitem.response_ip = ip_address(csv_split[InPos.SIP.value])
         outitem.arecord = arecord
         if outitem.response_ip != outitem.target_ip:
             outitem.odns_type = 'Transparent Forwarder'
@@ -82,14 +82,13 @@ class WorkerProcess(Process):
             outitem.odns_type = 'Forwarder'
         self._writeout_q.put(outitem)
 
-        del output_df[(csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))] 
+        del output_df[(csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))]
 
     def process_file(self, idx: int):
         """
         idx: index of the file to be read
         """
         self.print(f"processing file {idx+1}")
-        # input csv id is key
         output_df: Dict[(int, str), OutputItem]= {}
         for offset in range(NO_OF_FILES):
             if idx+offset > len(files)-1:
@@ -104,7 +103,7 @@ class WorkerProcess(Process):
                     if int(split[InPos.RESP_FLAG.value])==1: # response
                         self.process_line(output_df, split)
                     elif offset==0: # request (for everything except the first file we only want the responses)
-                        outitem = OutputItem(split[InPos.IP.value],None, None, split[InPos.TS.value],"")
+                        outitem = OutputItem(ip_address(split[InPos.IP.value]),None, None, split[InPos.TS.value],"")
                         output_df[(split[InPos.ID.value],int(split[InPos.SP.value]))] = outitem
 
     def run(self):
