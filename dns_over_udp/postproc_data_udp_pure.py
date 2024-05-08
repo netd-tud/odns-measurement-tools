@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from tqdm import tqdm
 import glob
 from ipaddress import ip_address
 from enum import Enum
@@ -8,7 +7,7 @@ import sys
 from multiprocessing import Process, Queue, Value, Lock
 from threading import Thread
 import time
-#from queue import Queue, Empty
+import os
 from typing import Dict, List, Tuple
 
 ##### vars #####
@@ -32,6 +31,14 @@ class OutputItem:
     timestamp: str
     odns_type: str
 
+    def classify(self):
+        if self.response_ip != self.target_ip:
+            self.odns_type = 'Transparent Forwarder'
+        elif self.arecord == self.response_ip:
+            self.odns_type = 'Resolver'
+        else:
+            self.odns_type = 'Forwarder'
+
 # only select the columns actually needed
 class InPos(Enum):
     TS    = 1
@@ -45,7 +52,14 @@ class InPos(Enum):
     RNAME = 21
     RECS  = 23
 
-def writer_thread(save_fname):
+class GoPos(Enum):
+    ID        = 0
+    TARGET_IP = 1
+    RESP_IP   = 2
+    AREC_IP   = 3
+    TS        = 4
+
+def writer_thread(save_fname: str):
     # writeout
     with open(save_fname, "w", encoding="utf-8") as out_file:
         while True:
@@ -53,6 +67,20 @@ def writer_thread(save_fname):
             if item is None: # sentinel
                 break
             out_file.write(f"{item.target_ip};{item.response_ip};{item.arecord};{item.timestamp};{item.odns_type}\n")
+
+def process_go_results(load_fname: str):
+    with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
+        while line := input_file.readline():
+            line = line.replace('"','')
+            split = line.strip().split(";")
+            outitem = OutputItem(
+                ip_address(split[GoPos.TARGET_IP.value]),
+                ip_address(split[GoPos.RESP_IP.value]),
+                ip_address(split[GoPos.AREC_IP.value]),
+                split[GoPos.TS.value],"")
+            outitem.classify()
+            QUEUE.put(outitem)
+
 
 class WorkerProcess(Process):
     def __init__(self, pid: int, writeout_q :Queue, files_pos, files_pos_lock):
@@ -62,7 +90,7 @@ class WorkerProcess(Process):
         self._files_pos = files_pos
         self._files_pos_lock = files_pos_lock
 
-    def process_line(self, output_df: Dict[Tuple[int, str], OutputItem], csv_split: List[str]):
+    def process_resp_line(self, output_df: Dict[Tuple[int, str], OutputItem], csv_split: List[str]):
         key =  (csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))  
         if key not in output_df:
             return
@@ -74,14 +102,8 @@ class WorkerProcess(Process):
         outitem = output_df[(csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))]
         outitem.response_ip = ip_address(csv_split[InPos.SIP.value])
         outitem.arecord = arecord
-        if outitem.response_ip != outitem.target_ip:
-            outitem.odns_type = 'Transparent Forwarder'
-        elif outitem.arecord == outitem.response_ip:
-            outitem.odns_type = 'Resolver'
-        else:
-            outitem.odns_type = 'Forwarder'
+        outitem.classify()
         self._writeout_q.put(outitem)
-
         del output_df[(csv_split[InPos.ID.value],int(csv_split[InPos.DP.value]))]
 
     def process_file(self, idx: int):
@@ -101,10 +123,13 @@ class WorkerProcess(Process):
                     if REFERENCE_QUERY_NAME not in [split[InPos.RNAME.value],split[InPos.QNAME.value]]:
                         continue
                     if int(split[InPos.RESP_FLAG.value])==1: # response
-                        self.process_line(output_df, split)
+                        self.process_resp_line(output_df, split)
                     elif offset==0: # request (for everything except the first file we only want the responses)
                         outitem = OutputItem(ip_address(split[InPos.IP.value]),None, None, split[InPos.TS.value],"")
                         output_df[(split[InPos.ID.value],int(split[InPos.SP.value]))] = outitem
+                    elif offset!=0 and (split[InPos.ID.value],int(split[InPos.SP.value])) in output_df.keys():
+                        # zmap might have already reused this port and dnsid -> so if there is a request with the same key already in the dict, this one is removed
+                        del output_df[(split[InPos.ID.value],int(split[InPos.SP.value]))]
 
     def run(self):
         while True:
@@ -127,28 +152,36 @@ if __name__ == "__main__":
         print("call like this: python postproc_data_tcp_pure.py </dir/file_pattern> <output_file>")
         exit(1)
     start_t = time.time()
-    files_pos = Value('i', 0)
-    files_pos_lock = Lock()
-    writeout_thread = Thread(target=writer_thread,args=[save_fname])
-    print('starting writeout thread...')
-    writeout_thread.start()
-    files = glob.glob(pattern)
-    files.sort() # this is important because the rest of the script depends on the file names being in alphabetical order
-    print(f"files[0]={files[0]},files[1]={files[1]}")
-    print('read file list')
+    # if the pattern is actually a file then the results of the gofile should be processed 
+    if os.path.isfile(pattern):
+        print("go script mode")
+        process_go_results(load_fname=pattern)
+    # otherwise the results of the zmap scan (which is more complicated)
+    else:
+        print("zmap script mode")
+        files_pos = Value('i', 0)
+        files_pos_lock = Lock()
+        writeout_thread = Thread(target=writer_thread,args=[save_fname])
+        print('starting writeout thread...')
+        writeout_thread.start()
+        files = glob.glob(pattern)
+        files.sort() # this is important because the rest of the script depends on the file names being in alphabetical order
+        print(f"files[0]={files[0]},files[1]={files[1]}")
+        print('read file list')
 
-    worker_pool: List[WorkerProcess] = []
-    for pid in range(THREAD_COUNT):
-        print(f"starting worker process {pid}")
-        worker = WorkerProcess(pid, QUEUE, files_pos, files_pos_lock)
-        worker_pool.append(worker)
-        worker.start()
-    
-    for worker in worker_pool:
-        worker.join()
-    print("all workers ended")
+        worker_pool: List[WorkerProcess] = []
+        for pid in range(THREAD_COUNT):
+            print(f"starting worker process {pid}")
+            worker = WorkerProcess(pid, QUEUE, files_pos, files_pos_lock)
+            worker_pool.append(worker)
+            worker.start()
+        
+        for worker in worker_pool:
+            worker.join()
+        print("all workers ended")
 
-    writeout_thread.join()
+        writeout_thread.join()
+    QUEUE.put(None) # ends the writer
     print("done")
     end_t = time.time()
     print(f"took:{end_t-start_t}s")
