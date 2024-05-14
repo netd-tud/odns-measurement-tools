@@ -63,6 +63,7 @@ class GoPos(Enum):
 def writer_thread(save_fname: str):
     # writeout
     with open(save_fname, "w", encoding="utf-8") as out_file:
+        print("writer file opened")
         while True:
             item = QUEUE.get()
             if item is None: # sentinel
@@ -74,13 +75,16 @@ def process_go_results(load_fname: str):
         while line := input_file.readline():
             line = line.replace('"','')
             split = line.strip().split(";")
-            outitem = OutputItem(
-                ip_address(split[GoPos.TARGET_IP.value]),
-                ip_address(split[GoPos.RESP_IP.value]),
-                ip_address(split[GoPos.AREC_IP.value]),
-                split[GoPos.TS.value],"")
-            outitem.classify()
-            QUEUE.put(outitem)
+            try:
+                outitem = OutputItem(
+                    ip_address(split[GoPos.TARGET_IP.value]),
+                    ip_address(split[GoPos.RESP_IP.value]),
+                    ip_address(split[GoPos.AREC_IP.value]),
+                    split[GoPos.TS.value],"")
+                outitem.classify()
+                QUEUE.put(outitem)
+            except ValueError:
+                continue
 
 
 class WorkerProcess(Process):
@@ -153,6 +157,9 @@ if __name__ == "__main__":
         print("call like this: python postproc_data_tcp_pure.py </dir/file_pattern> <output_file>")
         exit(1)
     start_t = time.time()
+    writeout_thread = Thread(target=writer_thread,args=[save_fname])
+    print('starting writeout thread...')
+    writeout_thread.start()
     # if the pattern is actually a file then the results of the gofile should be processed 
     if os.path.isfile(pattern):
         print("go script mode")
@@ -162,9 +169,6 @@ if __name__ == "__main__":
         print("zmap script mode")
         files_pos = Value('i', 0)
         files_pos_lock = Lock()
-        writeout_thread = Thread(target=writer_thread,args=[save_fname])
-        print('starting writeout thread...')
-        writeout_thread.start()
         files = glob.glob(pattern)
         tempfiles = natsorted(files) # this is important because the rest of the script depends on the file names being in alphabetical order
         files = tempfiles
@@ -182,8 +186,8 @@ if __name__ == "__main__":
             worker.join()
         print("all workers ended")
 
-        writeout_thread.join()
     QUEUE.put(None) # ends the writer
+    writeout_thread.join()
     print("done")
     end_t = time.time()
     print(f"took:{end_t-start_t}s")
