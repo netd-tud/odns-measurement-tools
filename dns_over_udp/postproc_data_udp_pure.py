@@ -76,10 +76,17 @@ def process_go_results(load_fname: str):
             line = line.replace('"','')
             split = line.strip().split(";")
             try:
+                if split[GoPos.AREC_IP.value] == "":
+                    continue
+                arecs = split[GoPos.AREC_IP.value].split(',')
+                # there should be two entries, one of them the control ip
+                if len(arecs) != 2 or "91.216.216.216" not in arecs:
+                    continue
+                arecord = ip_address(arecs[0] if arecs[1]=="91.216.216.216" else arecs[1])
                 outitem = OutputItem(
                     ip_address(split[GoPos.TARGET_IP.value]),
                     ip_address(split[GoPos.RESP_IP.value]),
-                    ip_address(split[GoPos.AREC_IP.value]),
+                    arecord,
                     split[GoPos.TS.value],"")
                 outitem.classify()
                 QUEUE.put(outitem)
