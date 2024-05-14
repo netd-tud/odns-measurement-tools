@@ -9,6 +9,7 @@ from threading import Thread
 import time
 import os
 from typing import Dict, List, Tuple
+from natsort import natsorted
 
 ##### vars #####
 # file 1: process all requests AND responses from file first file
@@ -18,7 +19,7 @@ from typing import Dict, List, Tuple
 # increasing this value will match file 1 with more than 1 other file 
 NO_OF_FILES = 2
 REFERENCE_QUERY_NAME = 'rr-mirror.research.nawrocki.berlin'
-THREAD_COUNT = 6
+THREAD_COUNT = 15
 ################
 
 QUEUE = Queue()
@@ -165,8 +166,9 @@ if __name__ == "__main__":
         print('starting writeout thread...')
         writeout_thread.start()
         files = glob.glob(pattern)
-        files.sort() # this is important because the rest of the script depends on the file names being in alphabetical order
-        print(f"files[0]={files[0]},files[1]={files[1]}")
+        tempfiles = natsorted(files) # this is important because the rest of the script depends on the file names being in alphabetical order
+        files = tempfiles
+        print(f"files[0]={files[0]},files[1]={files[1]},files[2]={files[2]}")
         print('read file list')
 
         worker_pool: List[WorkerProcess] = []
