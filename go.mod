@@ -10,6 +10,7 @@ require (
 	github.com/breml/bpfutils v0.0.0-20170519214641-cfcd7145376f
 	github.com/ilyakaznacheev/cleanenv v1.5.0
 	golang.org/x/net v0.18.0
+	golang.org/x/time v0.5.0
 )
 
 require (

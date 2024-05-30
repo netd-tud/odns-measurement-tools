@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	debug = true
+	debug = false
 )
 
 // config
@@ -39,6 +39,8 @@ type cfg_db struct {
 	Iface_name     string `yaml:"iface_name"`
 	Iface_ip       string `yaml:"iface_ip"`
 	Dst_port       uint16 `yaml:"dst_port"`
+	Port_min       uint16 `yaml:"port_min"`
+	Port_max       uint16 `yaml:"port_max"`
 	Dns_query      string `yaml:"dns_query"`
 	Excl_ips_fname string `yaml:"exclude_ips_fname"`
 	Pkts_per_sec   int    `yaml:"pkts_per_sec"`
@@ -58,100 +60,31 @@ var blocked_nets []*net.IPNet = []*net.IPNet{}
 
 var send_limiter *rate.Limiter
 
-// a simple struct for all the tcp flags needed
-type TCP_flags struct {
-	FIN, SYN, RST, PSH, ACK bool
-}
-
-func (flags TCP_flags) equals(tomatch TCP_flags) bool {
-	return flags.FIN == tomatch.FIN &&
-		flags.SYN == tomatch.SYN &&
-		flags.RST == tomatch.RST &&
-		flags.PSH == tomatch.PSH &&
-		flags.ACK == tomatch.ACK
-}
-
-func (flags TCP_flags) is_PSH_ACK() bool {
-	return flags.equals(TCP_flags{
-		FIN: false,
-		SYN: false,
-		RST: false,
-		PSH: true,
-		ACK: true,
-	})
-}
-
-func (flags TCP_flags) is_SYN_ACK() bool {
-	return flags.equals(TCP_flags{
-		FIN: false,
-		SYN: true,
-		RST: false,
-		PSH: false,
-		ACK: true,
-	})
-}
-
-func (flags TCP_flags) is_FIN_ACK() bool {
-	return flags.equals(TCP_flags{
-		FIN: true,
-		SYN: false,
-		RST: false,
-		PSH: false,
-		ACK: true,
-	})
-}
-
-func (flags TCP_flags) is_FIN_PSH_ACK() bool {
-	return flags.equals(TCP_flags{
-		FIN: true,
-		SYN: false,
-		RST: false,
-		PSH: true,
-		ACK: true,
-	})
-}
-
 var DNS_PAYLOAD_SIZE uint16
 
 var waiting_to_end = false
 
-/*	id:
-*	(seq-num)		(Ports from 61440)   	(2048 byte padding)
-*	2^32	*			2^11			/			 2^11		=2^32
-*
-*	increment: |y=11*x | z=21*x|
-*	seq_num = z*2^11, max:2^32-2^11
-*	port = y+15<<15 = y+61440
- */
+// slice for sockets that will be bound on program start
+var bound_sockets = []*net.UDPConn{}
 
-// this struct contains all relevant data to track the tcp connection
+// this struct contains all relevant data to track the dns query & response
 type scan_data_item struct {
 	id       uint32
 	ts       time.Time
 	ip       net.IP
-	port     layers.TCPPort
-	seq      uint32
-	ack      uint32
-	flags    TCP_flags
+	answerip net.IP
+	port     layers.UDPPort
+	dnsid    uint16
 	dns_recs []net.IP
-	Next     *scan_data_item
-}
-
-func (item *scan_data_item) last() *scan_data_item {
-	var cur *scan_data_item = item
-	for cur.Next != nil {
-		cur = cur.Next
-	}
-	return cur
 }
 
 // key for the map below
 type scan_item_key struct {
-	port layers.TCPPort
-	seq  uint32
+	port  layers.UDPPort
+	dnsid uint16
 }
 
-// map to track tcp connections, key is a tuple of (port, seq)
+// map to track udp communication, key is a tuple of (port, dnsid)
 type root_scan_data struct {
 	mu    sync.Mutex
 	items map[scan_item_key]*scan_data_item
@@ -164,31 +97,12 @@ var scan_data root_scan_data = root_scan_data{
 var write_chan = make(chan *scan_data_item, 4096)
 
 func scan_item_to_strarr(scan_item *scan_data_item) []string {
+	// csv format: id;target_ip;response_ip;arecords;timestamp;port;dnsid
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.id)))
-	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.ip.String())
-	record = append(record, scan_item.port.String())
-	record = append(record, strconv.Itoa(int(scan_item.seq)))
-	record = append(record, strconv.Itoa(int(scan_item.ack)))
-	var flags string
-	if scan_item.flags.SYN {
-		flags += "S"
-	}
-	if scan_item.flags.RST {
-		flags += "R"
-	}
-	if scan_item.flags.FIN {
-		flags += "F"
-	}
-	if scan_item.flags.PSH {
-		flags += "P"
-	}
-	if scan_item.flags.ACK {
-		flags += "A"
-	}
-	record = append(record, flags)
+	record = append(record, scan_item.answerip.String())
 	dns_answers := ""
 	for i, dns_ip := range scan_item.dns_recs {
 		dns_answers += dns_ip.String()
@@ -197,12 +111,15 @@ func scan_item_to_strarr(scan_item *scan_data_item) []string {
 		}
 	}
 	record = append(record, dns_answers)
+	record = append(record, scan_item.ts.UTC().Format("2006-01-02 15:04:05.000000"))
+	record = append(record, scan_item.port.String())
+	record = append(record, strconv.Itoa((int)(scan_item.dnsid)))
 	return record
 }
 
 func write_results() {
 	defer wg.Done()
-	csvfile, err := os.Create("tcp_results.csv.gz")
+	csvfile, err := os.Create("udp_results.csv.gz")
 	if err != nil {
 		panic(err)
 	}
@@ -217,15 +134,11 @@ func write_results() {
 
 	for {
 		select {
-		case root_item := <-write_chan:
-			scan_item := root_item
-			for scan_item != nil {
-				writer.Write(scan_item_to_strarr(scan_item))
-				scan_item = scan_item.Next
-			}
+		case scan_item := <-write_chan:
+			writer.Write(scan_item_to_strarr(scan_item))
 			// remove entry from map
 			scan_data.mu.Lock()
-			delete(scan_data.items, scan_item_key{root_item.port, root_item.seq})
+			delete(scan_data.items, scan_item_key{scan_item.port, scan_item.dnsid})
 			scan_data.mu.Unlock()
 		case <-stop_chan:
 			return
@@ -233,17 +146,17 @@ func write_results() {
 	}
 }
 
-// periodically remove keys (=connections) that get no response from map
+// periodically remove items that get no response from map
 func timeout() {
 	defer wg.Done()
 	for {
 		select {
-		case <-time.After(10 * time.Second):
+		case <-time.After(1 * time.Second):
 			//go through map's keyset
 			scan_data.mu.Lock()
 			for k, v := range scan_data.items {
 				//remove each key where its timestamp is older than x seconds
-				if time.Now().Unix()-v.ts.Unix() > 10 {
+				if time.Now().Unix()-v.ts.Unix() > 20 {
 					delete(scan_data.items, k)
 				}
 			}
@@ -259,7 +172,7 @@ var opts gopacket.SerializeOptions = gopacket.SerializeOptions{
 	FixLengths:       true,
 }
 
-func send_tcp_pkt(ip layers.IPv4, tcp layers.TCP, payload []byte) {
+func send_udp_pkt(ip layers.IPv4, udp layers.UDP, payload []byte) {
 	ip_head_buf := gopacket.NewSerializeBuffer()
 	err := ip.SerializeTo(ip_head_buf, opts)
 	if err != nil {
@@ -270,18 +183,18 @@ func send_tcp_pkt(ip layers.IPv4, tcp layers.TCP, payload []byte) {
 		panic(err)
 	}
 
-	tcp_buf := gopacket.NewSerializeBuffer()
-	err = gopacket.SerializeLayers(tcp_buf, opts, &tcp, gopacket.Payload(payload))
+	udp_buf := gopacket.NewSerializeBuffer()
+	err = gopacket.SerializeLayers(udp_buf, opts, &udp, gopacket.Payload(payload))
 	if err != nil {
 		panic(err)
 	}
 
-	if err = raw_con.WriteTo(ip_head, tcp_buf.Bytes(), nil); err != nil {
+	if err = raw_con.WriteTo(ip_head, udp_buf.Bytes(), nil); err != nil {
 		panic(err)
 	}
 }
 
-func build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) (layers.IPv4, layers.TCP, []byte) {
+func build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) (layers.IPv4, layers.UDP, []byte) {
 	// === build packet ===
 	// Create ip layer
 	ip := layers.IPv4{
@@ -289,21 +202,16 @@ func build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, 
 		TTL:      64,
 		SrcIP:    net.ParseIP(cfg.Iface_ip),
 		DstIP:    dst_ip,
-		Protocol: layers.IPProtocolTCP,
+		Protocol: layers.IPProtocolUDP,
 		Id:       1,
 	}
 
-	// Create tcp layer
-	tcp := layers.TCP{
+	// Create udp layer
+	udp := layers.UDP{
 		SrcPort: src_port,
-		DstPort: layers.TCPPort(cfg.Dst_port),
-		ACK:     true,
-		PSH:     true,
-		Seq:     ack_num,
-		Ack:     seq_num + 1,
-		Window:  8192,
+		DstPort: layers.UDPPort(cfg.Dst_port),
 	}
-	tcp.SetNetworkLayerForChecksum(&ip)
+	udp.SetNetworkLayerForChecksum(&ip)
 
 	// create dns layers
 	qst := layers.DNSQuestion{
@@ -316,50 +224,36 @@ func build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, 
 		RD:        true,
 		QDCount:   1,
 		OpCode:    layers.DNSOpCodeQuery,
-		ID:        uint16(rand.Intn(65536)),
+		ID:        dnsid,
 	}
 
 	dns_buf := gopacket.NewSerializeBuffer()
 	gopacket.SerializeLayers(dns_buf, gopacket.SerializeOptions{}, &dns)
-	// prepend dns payload with its size, as gopacket does not do this automatically
-	dns_buf_bytes := dns_buf.Bytes()
-	dns_corrected := make([]byte, len(dns_buf_bytes)+2)
-	dns_corrected[0] = uint8(0)
-	dns_corrected[1] = uint8(len(dns_buf_bytes))
-	for i := 0; i < len(dns_buf_bytes); i++ {
-		dns_corrected[i+2] = dns_buf_bytes[i]
-	}
-	return ip, tcp, dns_corrected
+	return ip, udp, dns_buf.Bytes()
 }
 
-func send_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) {
-	send_tcp_pkt(build_ack_with_dns(dst_ip, src_port, seq_num, ack_num))
-}
-
-func send_ack_pos_fin(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32, fin bool) {
-	// === build packet ===
-	// Create ip layer
-	ip := layers.IPv4{
-		Version:  4,
-		TTL:      64,
-		SrcIP:    net.ParseIP(cfg.Iface_ip),
-		DstIP:    dst_ip,
-		Protocol: layers.IPProtocolTCP,
-		Id:       1,
+func send_dns(id uint32, dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) {
+	// generate sequence number based on the first 21 bits of the hash
+	if debug {
+		log.Println(dst_ip, "port=", src_port, "dnsid=", dnsid)
 	}
-
-	// Create tcp layer
-	tcp := layers.TCP{
-		SrcPort: src_port,
-		DstPort: layers.TCPPort(cfg.Dst_port),
-		ACK:     true,
-		FIN:     fin,
-		Seq:     ack_num,
-		Ack:     seq_num + 1,
-		Window:  8192,
+	// check for sequence number collisions
+	scan_data.mu.Lock()
+	s_d_item := scan_data_item{
+		id:       id,
+		ts:       time.Now(),
+		ip:       dst_ip,
+		port:     src_port,
+		dns_recs: nil,
+		dnsid:    dnsid,
 	}
-	tcp.SetNetworkLayerForChecksum(&ip)
-	send_tcp_pkt(ip, tcp, nil)
+	if debug {
+		log.Println("scan_data=", s_d_item)
+	}
+	scan_data.items[scan_item_key{src_port, dnsid}] = &s_d_item
+	scan_data.mu.Unlock()
+
+	send_udp_pkt(build_dns(dst_ip, src_port, dnsid))
 }
 
 func handle_pkt(pkt gopacket.Packet) {
@@ -372,105 +266,22 @@ func handle_pkt(pkt gopacket.Packet) {
 		return
 	}
 
-	tcp_layer := pkt.Layer(layers.LayerTypeTCP)
-	if tcp_layer == nil {
+	udp_layer := pkt.Layer(layers.LayerTypeUDP)
+	if udp_layer == nil {
 		return
 	}
-	tcp, ok := tcp_layer.(*layers.TCP)
+	udp, ok := udp_layer.(*layers.UDP)
 	if !ok { // skip wrong packets
 		return
 	}
-	tcpflags := TCP_flags{
-		PSH: tcp.PSH,
-		FIN: tcp.FIN,
-		SYN: tcp.SYN,
-		RST: tcp.RST,
-		ACK: tcp.ACK,
-	}
-	if pkt.ApplicationLayer() == nil {
-		// SYN-ACK
-		if tcpflags.is_SYN_ACK() {
-			if debug {
-				log.Println("received SYN-ACK")
-			}
-			// check if item in map and assign value
-			scan_data.mu.Lock()
-			root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 1}]
-			scan_data.mu.Unlock()
-			if !ok {
-				return
-			}
-			last_data_item := root_data_item.last()
-			// this should not occur, this would be the case if a syn-ack is being received more than once
-			if last_data_item != root_data_item {
-				return
-			}
-			data := scan_data_item{
-				id:   last_data_item.id,
-				ts:   time.Now(),
-				port: tcp.DstPort,
-				seq:  tcp.Seq,
-				ack:  tcp.Ack,
-				ip:   ip.SrcIP,
-				flags: TCP_flags{
-					FIN: tcp.FIN,
-					SYN: tcp.SYN,
-					RST: tcp.RST,
-					PSH: tcp.PSH,
-					ACK: tcp.ACK,
-				},
-			}
-			last_data_item.Next = &data
-			send_ack_with_dns(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack)
-		} else
-		// FIN-ACK
-		if tcpflags.is_FIN_ACK() {
-			if debug {
-				log.Println("received FIN-ACK")
-			}
-			scan_data.mu.Lock()
-			root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 2 - uint32(DNS_PAYLOAD_SIZE)}]
-			scan_data.mu.Unlock()
-			if !ok {
-				return
-			}
-
-			last_data_item := root_data_item.last()
-			if !(last_data_item.flags.is_PSH_ACK()) {
-				if debug {
-					log.Println("missing PSH-ACK, dropping")
-				}
-				send_ack_pos_fin(ip.SrcIP, tcp.DstPort, tcp.Seq, tcp.Ack, true)
-				return
-			}
-			if debug {
-				log.Println("ACKing FIN-ACK")
-			}
-			send_ack_pos_fin(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, false)
-			write_chan <- root_data_item
-		}
-	} else
-	// PSH-ACK || FIN-PSH-ACK == DNS Response
-	if tcpflags.is_PSH_ACK() || tcpflags.is_FIN_PSH_ACK() {
+	// pkts w/o content will be dropped
+	if pkt.ApplicationLayer() != nil {
 		if debug {
-			log.Println("received PSH-ACK or FIN-PSH-ACK")
+			log.Println("received data")
 		}
 		// decode as DNS Packet
 		dns := &layers.DNS{}
-		// remove the first two bytes of the payload, i.e. size of the dns response
-		// see build_ack_with_dns()
-		if len(tcp.LayerPayload()) <= 2 {
-			return
-		}
-		// validate payload size
-		pld_size := int(tcp.LayerPayload()[0]) + int(tcp.LayerPayload()[1])<<8
-		if pld_size == len(tcp.LayerPayload())-2 {
-			return
-		}
-		pld := make([]byte, len(tcp.LayerPayload())-2)
-		for i := 0; i < len(pld); i++ {
-			pld[i] = tcp.LayerPayload()[i+2]
-		}
+		pld := udp.LayerPayload()
 		err := dns.DecodeFromBytes(pld, gopacket.NilDecodeFeedback)
 		if err != nil {
 			if debug {
@@ -483,23 +294,9 @@ func handle_pkt(pkt gopacket.Packet) {
 		}
 		// check if item in map and assign value
 		scan_data.mu.Lock()
-		root_data_item, ok := scan_data.items[scan_item_key{tcp.DstPort, tcp.Ack - 1 - uint32(DNS_PAYLOAD_SIZE)}]
+		scan_item, ok := scan_data.items[scan_item_key{udp.DstPort, dns.ID}]
 		scan_data.mu.Unlock()
 		if !ok {
-			return
-		}
-		last_data_item := root_data_item.last()
-		// this should not occur, this would be the case if a psh-ack is being received more than once
-		if last_data_item.flags.is_PSH_ACK() {
-			if debug {
-				log.Println("already received PSH-ACK")
-			}
-			return
-		}
-		if !(last_data_item.flags.is_SYN_ACK()) {
-			if debug {
-				log.Println("missing SYN-ACK")
-			}
 			return
 		}
 		answers := dns.Answers
@@ -514,33 +311,13 @@ func handle_pkt(pkt gopacket.Packet) {
 				if debug {
 					log.Println("non IP type found in answer")
 				}
-				return
+				//return
 			}
 		}
-		data := scan_data_item{
-			id:   last_data_item.id,
-			ts:   time.Now(),
-			port: tcp.DstPort,
-			seq:  tcp.Seq,
-			ack:  tcp.Ack,
-			ip:   ip.SrcIP,
-			flags: TCP_flags{
-				FIN: tcp.FIN,
-				SYN: tcp.SYN,
-				RST: tcp.RST,
-				PSH: tcp.PSH,
-				ACK: tcp.ACK,
-			},
-			dns_recs: answers_ip,
-		}
-		last_data_item.Next = &data
-		// send FIN-ACK to server
-		send_ack_pos_fin(root_data_item.ip, tcp.DstPort, tcp.Seq, tcp.Ack, true)
-		// if this pkt is fin-psh-ack we will remove it from the map at this point already
-		// because we wont receive any further fin-ack from the server
-		if tcpflags.is_FIN_PSH_ACK() {
-			write_chan <- root_data_item
-		}
+		scan_item.answerip = ip.SrcIP
+		scan_item.dns_recs = answers_ip
+		// queue for writeout
+		write_chan <- scan_item
 	}
 }
 
@@ -564,80 +341,40 @@ func packet_capture(handle *pcapgo.EthernetHandle) {
 	}
 }
 
-func send_syn(id uint32, dst_ip net.IP) {
-	// generate sequence number based on the first 21 bits of the hash
-	seq := (id & 0x1FFFFF) * 2048
-	port := layers.TCPPort(((id & 0xFFE00000) >> 21) + 61440)
-	if debug {
-		log.Println(dst_ip, "seq_num=", seq)
-	}
-	// check for sequence number collisions
-	scan_data.mu.Lock()
-	s_d_item := scan_data_item{
-		id:   id,
-		ts:   time.Now(),
-		ip:   dst_ip,
-		port: port,
-		seq:  seq,
-		ack:  0,
-		flags: TCP_flags{
-			FIN: false,
-			ACK: false,
-			RST: false,
-			PSH: false,
-			SYN: true,
-		},
-		dns_recs: nil,
-		Next:     nil,
-	}
-	if debug {
-		log.Println("scan_data=", s_d_item)
-	}
-	scan_data.items[scan_item_key{port, seq}] = &s_d_item
-	scan_data.mu.Unlock()
-
-	// === build packet ===
-	// Create ip layer
-	ip := layers.IPv4{
-		Version:  4,
-		TTL:      64,
-		SrcIP:    net.ParseIP(cfg.Iface_ip),
-		DstIP:    dst_ip,
-		Protocol: layers.IPProtocolTCP,
-		Id:       1,
-	}
-
-	// Create tcp layer
-	tcp := layers.TCP{
-		SrcPort: port,
-		DstPort: 53,
-		SYN:     true,
-		Seq:     seq,
-		Ack:     0,
-	}
-	tcp.SetNetworkLayerForChecksum(&ip)
-
-	send_tcp_pkt(ip, tcp, nil)
+// lockable datastructure for the init phase
+type synced_init struct {
+	mu    sync.Mutex
+	id    uint32
+	port  uint16
+	dnsid uint16
 }
 
-type u32id struct {
-	mu sync.Mutex
-	id uint32
+// synced between multiple init_udp()
+var ip_loop_id synced_init = synced_init{
+	id:    0,
+	port:  61440,
+	dnsid: 0,
 }
 
-// id for saving to results file, synced between multiple init_tcp()
-var ip_loop_id u32id = u32id{
-	id: 0,
-}
-
-func get_next_id() uint32 {
+func update_sync_init() (uint32, uint16, uint16) {
 	ip_loop_id.mu.Lock()
 	defer ip_loop_id.mu.Unlock()
 	ip_loop_id.id += 1
-	return ip_loop_id.id
+	if (uint32)(ip_loop_id.dnsid)+1 > 0xFFFF {
+		ip_loop_id.dnsid = 0
+		// restart at the beginning of the port range
+		if (uint32)(ip_loop_id.port)+1 > (uint32)(cfg.Port_max) {
+			ip_loop_id.port = cfg.Port_min
+		} else {
+			ip_loop_id.port += 1
+		}
+	} else {
+		ip_loop_id.dnsid += 1
+	}
+	return ip_loop_id.id, ip_loop_id.port, ip_loop_id.dnsid
 }
 
-func init_tcp() {
+func init_udp(port_min uint16, port_max uint16) {
 	defer wg.Done()
 	for {
 		select {
@@ -656,16 +393,16 @@ func init_tcp() {
 				}
 				continue
 			}
-			id := get_next_id()
+			id, src_port, dns_id := update_sync_init()
 			if debug {
-				log.Println("ip:", dst_ip, id)
+				log.Println("ip:", dst_ip, "id=", id, "port=", src_port, "dns_id=", dns_id)
 			}
 			r := send_limiter.Reserve()
 			if !r.OK() {
 				log.Println("Rate limit exceeded")
 			}
 			time.Sleep(r.Delay())
-			send_syn(id, dst_ip)
+			send_dns(id, dst_ip, layers.UDPPort(src_port), dns_id)
 		case <-stop_chan:
 			return
 		}
@@ -682,6 +419,9 @@ func read_ips_file(fname string) {
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
+		if waiting_to_end {
+			return
+		}
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -795,7 +535,7 @@ func gen_ips(netip net.IP, hostsize int) {
 		}
 	}
 	// wait some time to send out SYNs & handle the responses
-	// of the IPs just read before ending the program
+	// of the IPs just generated before ending the program
 	if debug {
 		log.Println("all ips generated, waiting to end ...")
 	}
@@ -853,40 +593,72 @@ func exclude_ips() {
 	}
 }
 
+// binding all the sockets potentially in use by the scanner
+// so no icmp port unreachable is sent and no other application
+// may use these ports by chance
+func bind_ports() {
+	if debug {
+		log.Println("Binding ports")
+	}
+	var port uint32
+	for port = (uint32)(cfg.Port_min); port <= (uint32)(cfg.Port_max); port++ {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{
+			IP:   net.ParseIP(cfg.Iface_ip),
+			Port: (int)(port),
+		})
+		if err != nil {
+			if debug {
+				log.Println("Could not bind to UDP port", port)
+				log.Println("reason:", err)
+			}
+			// TODO should then probably exclude these from the scan
+		} else {
+			bound_sockets = append(bound_sockets, conn)
+		}
+	}
+}
+
+func unbind_ports() {
+	if debug {
+		log.Println("Unbinding ports")
+	}
+	for _, sock := range bound_sockets {
+		sock.Close()
+	}
+}
+
 func main() {
-	// before running the script run below iptables command so that kernel doesn't send out RSTs
-	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+	// before running disable icmp unreachable msgs
+	// sudo iptables -I OUTPUT -p icmp --icmp-type destination-unreachable -j DROP
 
 	// write start ts to log
 	write_to_log("START " + time.Now().UTC().String())
 	// command line args
-	if len(os.Args) < 1 {
+	if len(os.Args) < 2 {
 		write_to_log("END " + time.Now().UTC().String() + " arg not given")
 		if debug {
 			log.Println("ERR need filename or net in CIDR notation")
 		}
 		return
 	}
-	ip_or_file_split := strings.Split(os.Args[1], "/")
+	ip, ip_net, err := net.ParseCIDR(os.Args[1])
+	_, file_err := os.Stat(os.Args[1])
 	var fname string
 	var netip net.IP
 	var hostsize int
-	if len(ip_or_file_split) == 1 {
+	if err != nil && file_err == nil {
 		// using filename
-		fname = ip_or_file_split[0]
-	} else if len(ip_or_file_split) == 2 {
+		fname = os.Args[1]
+	} else if err == nil {
 		// using CIDR net
-		netip = net.ParseIP(ip_or_file_split[0])
-		var err error
-		hostsize, err = strconv.Atoi(ip_or_file_split[1])
-		if err != nil {
-			panic(err)
-		}
-		hostsize = 32 - hostsize
+		netip = ip
+		ones, _ := ip_net.Mask.Size()
+		hostsize = 32 - ones
 	} else {
 		write_to_log("END " + time.Now().UTC().String() + " wrongly formatted input arg")
 		if debug {
 			log.Println("ERR check your input arg (filename or CIDR notation)")
+			return
 		}
 	}
 
@@ -900,6 +672,7 @@ func main() {
 				log.Println("already ending")
 			}
 		} else {
+			waiting_to_end = true
 			if debug {
 				log.Println("received SIGINT, ending")
 			}
@@ -909,9 +682,10 @@ func main() {
 
 	load_config()
 	exclude_ips()
+	bind_ports()
 	send_limiter = rate.NewLimiter(rate.Every(time.Duration(1000000/cfg.Pkts_per_sec)*time.Microsecond), 1)
 	// set the DNS_PAYLOAD_SIZE once as it is static
-	_, _, dns_payload := build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0)
+	_, _, dns_payload := build_dns(net.ParseIP("0.0.0.0"), 0, 0)
 	DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
 	// start packet capture
 	handle, err := pcapgo.NewEthernetHandle(cfg.Iface_name)
@@ -924,7 +698,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("tcp and ip dst ", cfg.Iface_ip, " and src port 53"))
+	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("udp and ip dst ", cfg.Iface_ip, " and src port ", cfg.Dst_port))
 	if err != nil {
 		panic(err)
 	}
@@ -934,7 +708,7 @@ func main() {
 	}
 	// create raw l3 socket
 	var pkt_con net.PacketConn
-	pkt_con, err = net.ListenPacket("ip4:tcp", cfg.Iface_ip)
+	pkt_con, err = net.ListenPacket("ip4:udp", cfg.Iface_ip)
 	if err != nil {
 		panic(err)
 	}
@@ -950,7 +724,7 @@ func main() {
 	go timeout()
 	if fname != "" {
 		if debug {
-			log.Println("running in filename mode")
+			log.Println("running in filename mode, this will not be randomized, the ips are probed as listed in the file")
 		}
 		go read_ips_file(fname)
 	} else {
@@ -961,10 +735,11 @@ func main() {
 	}
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go init_tcp()
+		go init_udp(cfg.Port_min, cfg.Port_max)
 	}
 	go close_handle(handle)
 	wg.Wait()
+	unbind_ports()
 	if debug {
 		log.Println("all routines finished")
 	}

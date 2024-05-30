@@ -4,3 +4,5 @@ dst_port: 53
 dns_query: rr-mirror.research.nawrocki.berlin
 exclude_ips_fname: exclude_ips.txt
 pkts_per_sec: 100000
+port_min: 61440
+port_max: 65535

@@ -1,3 +1,10 @@
 config.yml
 *.csv.gz
-dns_traceroute
+*.log
+*.pcap
+traceroute_data
+run.elf
+.vscode/launch.json
+.venv/
+*.csv
+__pycache__/

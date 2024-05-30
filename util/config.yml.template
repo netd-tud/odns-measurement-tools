@@ -1,0 +1,3 @@
+iface_name: <iface>
+iface_ip: <ip>
+dst_port: 53
