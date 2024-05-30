@@ -419,6 +419,9 @@ func read_ips_file(fname string) {
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
+		if waiting_to_end {
+			return
+		}
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -638,26 +641,24 @@ func main() {
 		}
 		return
 	}
-	ip_or_file_split := strings.Split(os.Args[1], "/")
+	ip, ip_net, err := net.ParseCIDR(os.Args[1])
+	_, file_err := os.Stat(os.Args[1])
 	var fname string
 	var netip net.IP
 	var hostsize int
-	if len(ip_or_file_split) == 1 {
+	if err != nil && file_err == nil {
 		// using filename
-		fname = ip_or_file_split[0]
-	} else if len(ip_or_file_split) == 2 {
+		fname = os.Args[1]
+	} else if err == nil {
 		// using CIDR net
-		netip = net.ParseIP(ip_or_file_split[0])
-		var err error
-		hostsize, err = strconv.Atoi(ip_or_file_split[1])
-		if err != nil {
-			panic(err)
-		}
-		hostsize = 32 - hostsize
+		netip = ip
+		ones, _ := ip_net.Mask.Size()
+		hostsize = 32 - ones
 	} else {
 		write_to_log("END " + time.Now().UTC().String() + " wrongly formatted input arg")
 		if debug {
 			log.Println("ERR check your input arg (filename or CIDR notation)")
+			return
 		}
 	}
 
@@ -671,6 +672,7 @@ func main() {
 				log.Println("already ending")
 			}
 		} else {
+			waiting_to_end = true
 			if debug {
 				log.Println("received SIGINT, ending")
 			}
