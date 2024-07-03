@@ -8,3 +8,5 @@ run.elf
 .venv/
 *.csv
 __pycache__/
+backup/
+*.prof
