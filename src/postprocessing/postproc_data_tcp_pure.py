@@ -11,7 +11,17 @@ class OutputItem:
     response_ip: ip_address
     arecord: ip_address # if the control ip is not present the entire item is removed from output frame
     timestamp: str
+    timestamp_response: str
     integrity: bytes # 0 0 0 0 0 SYN SYN-ACK (FIN)-PSH-ACK ==> must be 7 in the end
+    odns_type: str
+
+    def classify(self):
+        if self.response_ip != self.target_ip:
+            self.odns_type = 'Transparent Forwarder'
+        elif self.arecord == self.response_ip:
+            self.odns_type = 'Resolver'
+        else:
+            self.odns_type = 'Forwarder'
 
 class InPos(Enum):
     ID = 0
@@ -23,11 +33,11 @@ class InPos(Enum):
 # input csv id is key
 output_df: dict[int, OutputItem]= {}
 
-if len(sys.argv) == 2:
+if len(sys.argv) == 3:
     load_fname = sys.argv[1]
-    save_fname = sys.argv[1].split(".")[0]+"_combined.csv.gz"
+    save_fname = sys.argv[2]
 else:
-    print("call like this: python postproc_data_tcp_pure.py <filename.csv.gz>")
+    print("call like this: python postproc_data_tcp_pure.py <inputfile.csv.gz> <outputfile.csv.gz>")
     exit(1)
 
 # we will read the input csv
@@ -43,7 +53,7 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
         if split[InPos.ID.value] in output_df:
             outitem = output_df[split[InPos.ID.value]]
         else:
-            outitem = OutputItem(None, None, None, "", 0)
+            outitem = OutputItem(None, None, None, "","", 0,"")
             output_df[split[InPos.ID.value]] = outitem
 
         # we shall have a SYN
@@ -57,6 +67,7 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
 	    # and a PSH-ACK or FIN-PSH-ACK
         elif split[InPos.FLAGS.value] == "PA" or split[InPos.FLAGS.value] == "FPA":
             outitem.response_ip = ip_address(split[InPos.IP.value])
+            outitem.timestamp_response = split[InPos.TS.value]
             arecs = split[InPos.RECS.value].split(",")
             # there should be two entries, one of them the control ip
             if len(arecs) != 2:
@@ -70,10 +81,11 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
             outitem.arecord = ip_address(arecs[1-pos])
 
             outitem.integrity = outitem.integrity | 0x1
+            outitem.classify()
 
 # writeout
 with gzip.open(save_fname, "wt", encoding="utf-8") as out_file:
     for id, item in output_df.items():
         if item.integrity == 0x7:
-            out_file.write(f"{id};{item.target_ip};{item.response_ip};{item.arecord};{item.timestamp}\n")
+            out_file.write(f"{id};{item.target_ip};{item.response_ip};{item.arecord};{item.odns_type};{item.timestamp};{item.timestamp_response}\n")
         #else: print(f"integrity failing for {id},{item}")
