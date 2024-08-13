@@ -7,7 +7,6 @@ import (
 	"dns_tools/config"
 	"dns_tools/logging"
 	"encoding/binary"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -19,14 +18,10 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/pcapgo"
-
-	"github.com/breml/bpfutils"
 )
 
 type Tcp_traceroute struct {
-	common.Scanner_traceroute
+	common.Base
 	tcp_common.Tcp_sender
 	lowest_port   uint16
 	highest_port  uint16
@@ -723,26 +718,7 @@ func (tcpt *Tcp_traceroute) Start_traceroute(args []string) {
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := tcpt.build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0, 0)
 	tcpt.DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
-	// start packet capture
-	handle, err := pcapgo.NewEthernetHandle(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	defer handle.Close()
-
-	iface, err := net.InterfaceByName(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("(icmp or (tcp and src port 53)) and ip dst ", config.Cfg.Iface_ip)) //, " and src port 53"))
-	if err != nil {
-		panic(err)
-	}
-	bpf_raw := bpfutils.ToBpfRawInstructions(bpf_instr)
-	if err := handle.SetBPF(bpf_raw); err != nil {
-		panic(err)
-	}
-
+	handle := common.Get_ether_handle("tcp")
 	// start packet capture as goroutine
 	tcpt.Wg.Add(4)
 	go tcpt.Packet_capture(handle)

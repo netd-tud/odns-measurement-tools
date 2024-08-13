@@ -65,3 +65,41 @@ func (sender *Udp_sender) Send_udp_pkt(ip layers.IPv4, udp layers.UDP, payload [
 		}
 	}
 }
+
+func (sender *Udp_sender) Build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16, query string) (layers.IPv4, layers.UDP, []byte) {
+	// === build packet ===
+	// Create ip layer
+	ip := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    net.ParseIP(config.Cfg.Iface_ip),
+		DstIP:    dst_ip,
+		Protocol: layers.IPProtocolUDP,
+		Id:       1,
+	}
+
+	// Create udp layer
+	udp := layers.UDP{
+		SrcPort: src_port,
+		DstPort: layers.UDPPort(config.Cfg.Dst_port),
+	}
+	udp.SetNetworkLayerForChecksum(&ip)
+
+	// create dns layers
+	qst := layers.DNSQuestion{
+		Name:  []byte(query),
+		Type:  layers.DNSTypeA,
+		Class: layers.DNSClassIN,
+	}
+	dns := layers.DNS{
+		Questions: []layers.DNSQuestion{qst},
+		RD:        true,
+		QDCount:   1,
+		OpCode:    layers.DNSOpCodeQuery,
+		ID:        dnsid,
+	}
+
+	dns_buf := gopacket.NewSerializeBuffer()
+	gopacket.SerializeLayers(dns_buf, gopacket.SerializeOptions{}, &dns)
+	return ip, udp, dns_buf.Bytes()
+}

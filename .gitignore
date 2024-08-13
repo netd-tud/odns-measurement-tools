@@ -10,3 +10,4 @@ run.elf
 __pycache__/
 backup/
 *.prof
+ratelimit_results/

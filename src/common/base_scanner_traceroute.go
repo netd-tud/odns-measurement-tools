@@ -70,7 +70,7 @@ func (l2 *RawL2) Send(payload []byte) {
 	}
 }
 
-type Scanner_traceroute struct {
+type Base struct {
 	Wg               sync.WaitGroup
 	Base_methods     IBase_methods
 	Stop_chan        chan stop
@@ -82,7 +82,7 @@ type Scanner_traceroute struct {
 	Writer           *csv.Writer
 }
 
-func (st *Scanner_traceroute) Base_init() {
+func (st *Base) Base_init() {
 	st.Stop_chan = make(chan stop) // (〃・ω・〃)
 	st.Ip_chan = make(chan net.IP, 1024)
 	st.Waiting_to_end = false
@@ -132,7 +132,7 @@ func (st *Scanner_traceroute) Base_init() {
 	}
 }
 
-func (st *Scanner_traceroute) Packet_capture(handle *pcapgo.EthernetHandle) {
+func (st *Base) Packet_capture(handle *pcapgo.EthernetHandle) {
 	defer st.Wg.Done()
 	logging.Println(3, nil, "starting packet capture")
 	pkt_src := gopacket.NewPacketSource(
@@ -149,7 +149,7 @@ func (st *Scanner_traceroute) Packet_capture(handle *pcapgo.EthernetHandle) {
 }
 
 // handle ctrl+c SIGINT
-func (st *Scanner_traceroute) Handle_ctrl_c() {
+func (st *Base) Handle_ctrl_c() {
 	interrupt_chan := make(chan os.Signal, 1)
 	signal.Notify(interrupt_chan, os.Interrupt)
 	<-interrupt_chan
@@ -162,7 +162,7 @@ func (st *Scanner_traceroute) Handle_ctrl_c() {
 	}
 }
 
-func (st *Scanner_traceroute) Close_handle(handle *pcapgo.EthernetHandle) {
+func (st *Base) Close_handle(handle *pcapgo.EthernetHandle) {
 	defer st.Wg.Done()
 	<-st.Stop_chan
 	logging.Println(3, nil, "closing handle")

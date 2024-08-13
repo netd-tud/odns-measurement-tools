@@ -20,7 +20,9 @@ type cfg_db struct {
 	Port_max           uint16 `yaml:"port_max"`
 	Port_reuse_timeout int    `yaml:"port_reuse_timeout"`
 	Number_routines    uint16 `yaml:"no_of_routines"`
-	Craft_ethernet     bool
+	Craft_ethernet     bool   `yaml:"craft_ethernet"`
+	Dynamic_domain     bool   `yaml:"dynamic_domain"`
+	Rate_curve         string `yaml:"rate_curve"`
 }
 
 var Cfg cfg_db

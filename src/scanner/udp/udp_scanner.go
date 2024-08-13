@@ -1,12 +1,12 @@
 package udpscanner
 
 import (
+	"dns_tools/common"
 	"dns_tools/common/udp_common"
 	"dns_tools/config"
 	"dns_tools/generator"
 	"dns_tools/logging"
 	"dns_tools/scanner"
-	"fmt"
 	"log"
 	"math"
 	"net"
@@ -17,15 +17,12 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/pcapgo"
-
-	"github.com/breml/bpfutils"
 )
 
 type Udp_scanner struct {
 	scanner.Base_scanner
 	udp_common.Udp_sender
+	udp_common.Udp_binder
 	// slice for sockets that will be bound on program start
 	bound_sockets []*net.UDPConn
 	ip_loop_id    synced_init
@@ -111,44 +108,6 @@ func scan_item_to_strarr(scan_item *udp_scan_data_item) []string {
 	return record
 }
 
-func (udps *Udp_scanner) build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) (layers.IPv4, layers.UDP, []byte) {
-	// === build packet ===
-	// Create ip layer
-	ip := layers.IPv4{
-		Version:  4,
-		TTL:      64,
-		SrcIP:    net.ParseIP(config.Cfg.Iface_ip),
-		DstIP:    dst_ip,
-		Protocol: layers.IPProtocolUDP,
-		Id:       1,
-	}
-
-	// Create udp layer
-	udp := layers.UDP{
-		SrcPort: src_port,
-		DstPort: layers.UDPPort(config.Cfg.Dst_port),
-	}
-	udp.SetNetworkLayerForChecksum(&ip)
-
-	// create dns layers
-	qst := layers.DNSQuestion{
-		Name:  []byte(config.Cfg.Dns_query),
-		Type:  layers.DNSTypeA,
-		Class: layers.DNSClassIN,
-	}
-	dns := layers.DNS{
-		Questions: []layers.DNSQuestion{qst},
-		RD:        true,
-		QDCount:   1,
-		OpCode:    layers.DNSOpCodeQuery,
-		ID:        dnsid,
-	}
-
-	dns_buf := gopacket.NewSerializeBuffer()
-	gopacket.SerializeLayers(dns_buf, gopacket.SerializeOptions{}, &dns)
-	return ip, udp, dns_buf.Bytes()
-}
-
 func (udps *Udp_scanner) send_dns(id uint32, dst_ip net.IP, src_port layers.UDPPort, dnsid uint16) {
 	// generate sequence number based on the first 21 bits of the hash
 	logging.Println(6, nil, dst_ip, "port=", src_port, "dnsid=", dnsid)
@@ -166,7 +125,7 @@ func (udps *Udp_scanner) send_dns(id uint32, dst_ip net.IP, src_port layers.UDPP
 	udps.Scan_data.Items[udp_scan_item_key{src_port, dnsid}] = &s_d_item
 	udps.Scan_data.Mu.Unlock()
 
-	udps.Send_udp_pkt(udps.build_dns(dst_ip, src_port, dnsid))
+	udps.Send_udp_pkt(udps.Build_dns(dst_ip, src_port, dnsid, config.Cfg.Dns_query))
 }
 
 func (udps *Udp_scanner) Handle_pkt(pkt gopacket.Packet) {
@@ -285,34 +244,6 @@ func (udps *Udp_scanner) gen_ips(netip net.IP, hostsize int) {
 	close(udps.Stop_chan)
 }
 
-// binding all the sockets potentially in use by the scanner
-// so no icmp port unreachable is sent and no other application
-// may use these ports by chance
-func (udps *Udp_scanner) bind_ports() {
-	logging.Println(3, nil, "Binding ports")
-	var port uint32
-	for port = (uint32)(config.Cfg.Port_min); port <= (uint32)(config.Cfg.Port_max); port++ {
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{
-			IP:   net.ParseIP(config.Cfg.Iface_ip),
-			Port: (int)(port),
-		})
-		if err != nil {
-			logging.Println(2, nil, "Could not bind to UDP port", port)
-			logging.Println(2, nil, "reason:", err)
-			// TODO should then probably exclude these from the scan
-		} else {
-			udps.bound_sockets = append(udps.bound_sockets, conn)
-		}
-	}
-}
-
-func (udps *Udp_scanner) unbind_ports() {
-	logging.Println(3, nil, "Unbinding ports")
-	for _, sock := range udps.bound_sockets {
-		sock.Close()
-	}
-}
-
 func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
 	udps.Scanner_init()
 	udps.Sender_init()
@@ -340,30 +271,11 @@ func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
 	var hostsize int
 	fname, netip, hostsize = udps.Get_cidr_filename(args[0])
 
-	udps.bind_ports()
+	udps.Bind_ports()
 	// set the DNS_PAYLOAD_SIZE once as it is static
-	_, _, dns_payload := udps.build_dns(net.ParseIP("0.0.0.0"), 0, 0)
+	_, _, dns_payload := udps.Build_dns(net.ParseIP("0.0.0.0"), 0, 0, config.Cfg.Dns_query)
 	udps.DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
-	// start packet capture
-	handle, err := pcapgo.NewEthernetHandle(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	defer handle.Close()
-
-	iface, err := net.InterfaceByName(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("udp and ip dst ", config.Cfg.Iface_ip, " and src port ", config.Cfg.Dst_port))
-	if err != nil {
-		panic(err)
-	}
-	bpf_raw := bpfutils.ToBpfRawInstructions(bpf_instr)
-	if err := handle.SetBPF(bpf_raw); err != nil {
-		panic(err)
-	}
-
+	handle := common.Get_ether_handle("udp")
 	// start packet capture as goroutine
 	udps.Wg.Add(5)
 	go udps.Packet_capture(handle)
@@ -382,7 +294,7 @@ func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
 	}
 	go udps.Close_handle(handle)
 	udps.Wg.Wait()
-	udps.unbind_ports()
+	udps.Unbind_ports()
 	logging.Println(3, nil, "all routines finished")
 	logging.Write_to_runlog("END " + time.Now().UTC().String())
 	logging.Println(3, nil, "program done")

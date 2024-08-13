@@ -1,0 +1,11 @@
+iface_name: <iface>
+iface_ip: <ip>
+dst_port: 53
+dns_query: rr-mirror.research.nawrocki.berlin
+verbosity: 5
+no_of_routines: 1
+port_min: 61440
+port_max: 65535
+dynamic_domain: false
+pkts_per_sec: 100000
+rate_curve: 50, 100, 150, 200, 400, 600, 1000, 1500, 2000, 2500

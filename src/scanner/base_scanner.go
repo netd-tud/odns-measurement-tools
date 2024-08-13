@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcapgo"
 )
 
 type Scan_data_item interface {
@@ -38,7 +36,7 @@ type IScanner_Methods interface {
 }
 
 type Base_scanner struct {
-	common.Scanner_traceroute
+	common.Base
 	Blocked_nets    []*net.IPNet
 	Write_chan      chan *Scan_data_item
 	Scan_data       root_scan_data
@@ -200,20 +198,4 @@ func (bs *Base_scanner) Read_ips_file(fname string) {
 	// time to wait until end based on packet rate + channel size
 	time.Sleep(time.Duration(wait_time) * time.Second)
 	close(bs.Stop_chan)
-}
-
-func (bs *Base_scanner) Packet_capture(handle *pcapgo.EthernetHandle) {
-	defer bs.Wg.Done()
-	logging.Println(3, nil, "starting packet capture")
-	pkt_src := gopacket.NewPacketSource(
-		handle, layers.LinkTypeEthernet).Packets()
-	for {
-		select {
-		case pkt := <-pkt_src:
-			go bs.Scanner_methods.Handle_pkt(pkt)
-		case <-bs.Stop_chan:
-			logging.Println(3, nil, "stopping packet capture")
-			return
-		}
-	}
 }

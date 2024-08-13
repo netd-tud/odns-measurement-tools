@@ -4,6 +4,7 @@ import (
 	"dns_tools/common"
 	"dns_tools/config"
 	"dns_tools/logging"
+	"dns_tools/ratelimit"
 	tcpscanner "dns_tools/scanner/tcp"
 	udpscanner "dns_tools/scanner/udp"
 	traceroute_tcp "dns_tools/traceroute"
@@ -151,8 +152,18 @@ func main() {
 				fmt.Println("wrong protocol")
 				os.Exit(int(common.WRONG_INPUT_ARGS))
 			}
+		case "r":
+			fallthrough
+		case "rate":
+			fallthrough
+		case "ratelimit":
+			var rate_tester ratelimit.Rate_tester
+			if *outpath == "" {
+				*outpath = "ratelimit_results"
+			}
+			rate_tester.Start_ratetest(flag.Args(), *outpath)
 		default:
-			fmt.Println("wrong mode")
+			fmt.Println("wrong mode:", *mode_flag)
 			os.Exit(int(common.WRONG_INPUT_ARGS))
 		}
 	} else {

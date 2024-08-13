@@ -1,12 +1,12 @@
 package tcpscanner
 
 import (
+	"dns_tools/common"
 	"dns_tools/common/tcp_common"
 	"dns_tools/config"
 	"dns_tools/generator"
 	"dns_tools/logging"
 	"dns_tools/scanner"
-	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -15,11 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/breml/bpfutils"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/pcapgo"
 )
 
 type Tcp_scanner struct {
@@ -499,26 +496,7 @@ func (tcps *Tcp_scanner) Start_scan(args []string, outpath string) {
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := tcps.Build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0)
 	tcps.DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
-	// start packet capture
-	handle, err := pcapgo.NewEthernetHandle(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	defer handle.Close()
-
-	iface, err := net.InterfaceByName(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("tcp and ip dst ", config.Cfg.Iface_ip, " and src port 53"))
-	if err != nil {
-		panic(err)
-	}
-	bpf_raw := bpfutils.ToBpfRawInstructions(bpf_instr)
-	if err := handle.SetBPF(bpf_raw); err != nil {
-		panic(err)
-	}
-
+	handle := common.Get_ether_handle("tcp")
 	// start packet capture as goroutine
 	tcps.Wg.Add(5)
 	go tcps.Packet_capture(handle)
