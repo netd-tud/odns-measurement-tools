@@ -1,9 +1,15 @@
 iface_name: <iface>
 iface_ip: <ip>
 dst_port: 53
-dns_query: rr-mirror.research.nawrocki.berlin
+dns_query: <domain>
+dns_query_type: A
+dnssec_enabled: false
+log_dnsrecs: false
+ends0_enabled: false
+ends0_buffer_size: 4096
 exclude_ips_fname: exclude_ips.txt
 pkts_per_sec: 100000
 port_min: 61440
 port_max: 65535
-Verbosity: 6
+verbosity: 6
+no_of_routines: 10

@@ -144,15 +144,7 @@ func (tcpt *Tcp_traceroute) send_ack_with_dns(dst_ip net.IP, src_port layers.TCP
 	tcpt.Send_tcp_pkt(tcpt.build_ack_with_dns(dst_ip, src_port, seq_num, ack_num, ttl))
 }
 
-func (tcpt *Tcp_traceroute) Handle_pkt(pkt gopacket.Packet) {
-	ip_layer := pkt.Layer(layers.LayerTypeIPv4)
-	if ip_layer == nil {
-		return
-	}
-	ip, ok := ip_layer.(*layers.IPv4)
-	if !ok {
-		return
-	}
+func (tcpt *Tcp_traceroute) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 	icmp_layer := pkt.Layer(layers.LayerTypeICMPv4)
 	icmp, _ := icmp_layer.(*layers.ICMPv4)
 	if icmp != nil && icmp.TypeCode == layers.ICMPv4TypeTimeExceeded {
@@ -302,11 +294,7 @@ func (tcpt *Tcp_traceroute) Handle_pkt(pkt gopacket.Packet) {
 					logging.Println(3, tcpt.id_from_port(uint16(start_port)), "[*] Initializing DNS Traceroute to", ip.SrcIP, "over", params.initial_ip, "on port", tcp.DstPort)
 
 					for i := 1; i < 30; i++ {
-						r := tcpt.Send_limiter.Reserve()
-						if !r.OK() {
-							logging.Println(1, tcpt.id_from_port(uint16(start_port)), "[Sending PA with DNS] Rate limit exceeded")
-						}
-						time.Sleep(r.Delay())
+						_ = tcpt.Send_limiter.Take()
 						if params.dns_reply_received != -1 {
 							break
 						}
@@ -509,11 +497,7 @@ func (tcpt *Tcp_traceroute) init_traceroute(start_port uint16) {
 			params.traceroute_mutex.Unlock()
 			logging.Println(3, tcpt.id_from_port(start_port), "[*] TCP Traceroute to ", netip)
 			for i := 1; i <= 30; i++ {
-				r := tcpt.Send_limiter.Reserve()
-				if !r.OK() {
-					logging.Println(1, tcpt.id_from_port(start_port), "[Initial SYN] Rate limit exceeded")
-				}
-				time.Sleep(r.Delay())
+				_ = tcpt.Send_limiter.Take()
 				if params.syn_ack_received != -1 {
 					break
 				}
@@ -684,8 +668,7 @@ func (tcpt *Tcp_traceroute) Write_results() {
 func (tcpt *Tcp_traceroute) Start_traceroute(args []string) {
 	tcpt.Traceroute_init()
 	tcpt.Base_methods = tcpt
-	// TODO run iptables command so that kernel doesnt send out RSTs
-	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+	tcpt.Set_iptable_rule()
 
 	cur_usr, _ := user.Current()
 	logging.Println(0, nil, "Current User UID:", cur_usr.Uid)
@@ -718,7 +701,7 @@ func (tcpt *Tcp_traceroute) Start_traceroute(args []string) {
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := tcpt.build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0, 0)
 	tcpt.DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
-	handle := common.Get_ether_handle("tcp")
+	handle := common.Get_ether_handle()
 	// start packet capture as goroutine
 	tcpt.Wg.Add(4)
 	go tcpt.Packet_capture(handle)
@@ -735,6 +718,7 @@ func (tcpt *Tcp_traceroute) Start_traceroute(args []string) {
 	}
 	go tcpt.Close_handle(handle)
 	tcpt.Wg.Wait()
-	logging.Println(3, "", "all routines finished")
+	logging.Println(3, "Teardown", "all routines finished")
+	tcpt.Remove_iptable_rule()
 	logging.Println(3, "", "program done")
 }

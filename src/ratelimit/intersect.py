@@ -36,8 +36,6 @@ if __name__ == "__main__":
     print("dataframes read")
 
     # join on common response ips
-    #intersect_df = resolver_df.merge(scan_df, on="ip_response", how="inner")
-    #not_intersect_df = resolver_df.subtract(intersect_df)
     not_intersect_df = pd.merge(scan_df, resolver_df, indicator=True, how='outer').query('_merge=="left_only"').drop('_merge', axis=1)
     not_intersect_df['ip_response'] = not_intersect_df['ip_response'].apply(lambda ip: long2ip(ip))
     print(not_intersect_df)

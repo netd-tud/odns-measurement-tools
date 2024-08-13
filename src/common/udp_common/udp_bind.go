@@ -3,6 +3,7 @@ package udp_common
 import (
 	"dns_tools/config"
 	"dns_tools/logging"
+	"fmt"
 	"net"
 )
 
@@ -14,7 +15,7 @@ type Udp_binder struct {
 // so no icmp port unreachable is sent and no other application
 // may use these ports by chance
 func (binder *Udp_binder) Bind_ports() {
-	logging.Println(3, nil, "Binding ports")
+	logging.Println(3, "Bind", fmt.Sprintf("Binding ports (%d-%d)", config.Cfg.Port_min, config.Cfg.Port_max))
 	var port uint32
 	for port = (uint32)(config.Cfg.Port_min); port <= (uint32)(config.Cfg.Port_max); port++ {
 		conn, err := net.ListenUDP("udp", &net.UDPAddr{
@@ -22,8 +23,8 @@ func (binder *Udp_binder) Bind_ports() {
 			Port: (int)(port),
 		})
 		if err != nil {
-			logging.Println(2, nil, "Could not bind to UDP port", port)
-			logging.Println(2, nil, "reason:", err)
+			logging.Println(2, "Bind", "Could not bind to UDP port", port)
+			logging.Println(2, "Bind", "reason:", err)
 			// TODO should then probably exclude these from the scan
 		} else {
 			binder.bound_sockets = append(binder.bound_sockets, conn)
@@ -32,7 +33,7 @@ func (binder *Udp_binder) Bind_ports() {
 }
 
 func (binder *Udp_binder) Unbind_ports() {
-	logging.Println(3, nil, "Unbinding ports")
+	logging.Println(3, "Bind", "Unbinding ports")
 	for _, sock := range binder.bound_sockets {
 		sock.Close()
 	}

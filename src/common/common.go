@@ -5,6 +5,7 @@ import (
 	"dns_tools/logging"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"strings"
 
@@ -41,7 +42,7 @@ func Int2ip4(nn uint32) net.IP {
 	return ip
 }
 
-func Get_ether_handle(prot string) *pcapgo.EthernetHandle {
+func Get_ether_handle() *pcapgo.EthernetHandle {
 	handle, err := pcapgo.NewEthernetHandle(config.Cfg.Iface_name)
 	if err != nil {
 		panic(err)
@@ -51,8 +52,8 @@ func Get_ether_handle(prot string) *pcapgo.EthernetHandle {
 	if err != nil {
 		panic(err)
 	}
-	filter_string := fmt.Sprint("udp and ip dst ", config.Cfg.Iface_ip, " and src port ", config.Cfg.Dst_port)
-	logging.Println(5, nil, "filter string:", filter_string)
+	filter_string := fmt.Sprint("ip dst ", config.Cfg.Iface_ip) //, " and src port ", config.Cfg.Dst_port , " and ", prot)
+	logging.Println(5, "Handle", "filter string:", filter_string)
 	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, filter_string)
 	if err != nil {
 		panic(err)
@@ -69,4 +70,28 @@ func Max(a float64, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func Std_dev(data []float64) float64 {
+	n := float64(len(data))
+	if n == 0 {
+		return 0
+	}
+
+	// mean
+	var sum float64
+	for _, value := range data {
+		sum += value
+	}
+	mean := sum / n
+
+	// variance
+	var var_sum float64
+	for _, value := range data {
+		var_sum += (value - mean) * (value - mean)
+	}
+	variance := var_sum / n
+
+	// standard deviation
+	return math.Sqrt(variance)
 }

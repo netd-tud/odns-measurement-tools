@@ -3,7 +3,6 @@ set -e
 
 CONFIG_FILE=scanner/udp/config_uniq.yml
 TEMP_UNIQ_RESOLVERS_PATH=_uniq_resolvers.csv
-intersect_out=intersect_out.csv.gz
 
 input_file="udp_results.csv.gz"
 if [ -n "$1" ]; then
@@ -20,6 +19,11 @@ if [ -n "$2" ]; then
     scan_output_file=$2
 fi
 
+intersect_out=intersect_out.csv.gz
+if [ -n "$3" ]; then
+    intersect_out=$3
+fi
+
 echo "accumulating unique resolvers"
 zcat $input_file | grep ";Transparent" | cut -d ";" -f 3 | tail -n +2 | sort | uniq | shuf > $TEMP_UNIQ_RESOLVERS_PATH
 echo "there are $(cat $TEMP_UNIQ_RESOLVERS_PATH | wc -l) unique resolvers"
@@ -34,7 +38,7 @@ sudo go run dns_tool.go -m s -p udp -c $CONFIG_FILE -o $scan_output_file $TEMP_U
 sudo rm $TEMP_UNIQ_RESOLVERS_PATH
 echo "there are $(cat $scan_output_file | wc -l) public resolvers"
 
-echo "determining cross section of public and restrictive resolvers"
+echo "determining negated intersection of public and restrictive resolvers"
 source .venv/bin/activate
 python ratelimit/intersect.py $scan_output_file $input_file $intersect_out
 

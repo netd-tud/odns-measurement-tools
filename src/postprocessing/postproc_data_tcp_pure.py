@@ -4,6 +4,8 @@ from enum import Enum
 import gzip
 import sys
 
+REFERENCE_IP = "91.216.216.216"
+
 # this will more or less represent a single row of the output csv
 @dataclass
 class OutputItem:
@@ -74,7 +76,7 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
                 output_df.pop(InPos.ID.value, None) # remove from output dict
                 continue
             try:
-                pos = arecs.index("91.216.216.216")
+                pos = arecs.index(REFERENCE_IP)
             except ValueError:
                 output_df.pop(InPos.ID.value, None) # remove from output dict
                 continue
