@@ -1,7 +1,7 @@
 iface_name: <iface>
 iface_ip: <ip>
 dst_port: 53
-dns_query: rr-mirror.research.nawrocki.berlin
+dns_query: <qname>
 exclude_ips_fname: exclude_ips.txt
 pkts_per_sec: 100000
 Verbosity: 6
