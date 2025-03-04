@@ -1,0 +1,23 @@
+iface_name: <iface>
+iface_ip: <ip>
+dst_port: 53
+dns_query: <domain>
+dns_query_type: A
+verbosity: 5
+no_of_routines: 1
+rate_subroutines: 5
+port_min: 61440
+port_max: 65535
+domain_mode: <constant|hash|list|inject>
+domain_list: <txt file of domains>
+pkts_per_sec: 100000
+rate_curve: 50, 100, 150, 200, 400, 600, 1000, 1500, 2000, 2500
+rate_mode: <probe|direct>
+rate_increase_interval: 2000
+rate_adhere_threshold: true
+rate_receive_threshold: 0.75
+rate_inject_speed: 100
+rate_inject_count: 1000
+rate_inject_routines: 1000
+rate_response_ip_only: false
+rate_concurrent_pool: false

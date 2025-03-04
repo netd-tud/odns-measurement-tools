@@ -25,7 +25,7 @@ type Lcg struct {
 func (lcg *Lcg) Init(stop int) {
 	// Seed range with a random integer.
 	lcg.value = rand.Intn(stop)
-	lcg.offset = rand.Intn(stop)*2 + 1                                  // Pick a random odd-valued offset.
+	lcg.offset = (rand.Intn(stop)+stop)*2 + 1                           // Pick a random odd-valued offset.
 	lcg.multiplier = 4*(int(stop/4)) + 1                                // Pick a multiplier 1 greater than a multiple of 4
 	lcg.modulus = int(math.Pow(2, math.Ceil(math.Log2(float64(stop))))) // Pick a modulus just big enough to generate all numbers (power of 2)
 	lcg.found = 0                                                       // Track how many random numbers have been returned

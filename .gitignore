@@ -1,4 +1,4 @@
-config.yml
+*.yml
 *.csv.gz
 *.log
 *.pcap
@@ -10,3 +10,8 @@ run.elf
 __pycache__/
 backup/
 *.prof
+ratelimit_results/
+*.tar.gz
+*.txt.gz
+*.pcapng
+dns_tools

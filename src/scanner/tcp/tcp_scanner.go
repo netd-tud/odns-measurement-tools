@@ -1,12 +1,12 @@
 package tcpscanner
 
 import (
+	"dns_tools/common"
 	"dns_tools/common/tcp_common"
 	"dns_tools/config"
 	"dns_tools/generator"
 	"dns_tools/logging"
 	"dns_tools/scanner"
-	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -15,11 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/breml/bpfutils"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/pcapgo"
 )
 
 type Tcp_scanner struct {
@@ -176,16 +173,7 @@ func (tcps *Tcp_scanner) Write_item(root_item *scanner.Scan_data_item) {
 	tcps.Scan_data.Mu.Unlock()
 }
 
-func (tcps *Tcp_scanner) Handle_pkt(pkt gopacket.Packet) {
-	ip_layer := pkt.Layer(layers.LayerTypeIPv4)
-	if ip_layer == nil {
-		return
-	}
-	ip, ok := ip_layer.(*layers.IPv4)
-	if !ok {
-		return
-	}
-
+func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 	tcp_layer := pkt.Layer(layers.LayerTypeTCP)
 	if tcp_layer == nil {
 		return
@@ -414,8 +402,9 @@ var ip_loop_id u32id = u32id{
 func (tcps *Tcp_scanner) get_next_id() uint32 {
 	ip_loop_id.mu.Lock()
 	defer ip_loop_id.mu.Unlock()
+	last_id := ip_loop_id.id
 	ip_loop_id.id += 1
-	return ip_loop_id.id
+	return last_id
 }
 
 func (tcps *Tcp_scanner) init_tcp() {
@@ -438,11 +427,7 @@ func (tcps *Tcp_scanner) init_tcp() {
 			id := tcps.get_next_id()
 			logging.Println(6, nil, "ip:", dst_ip, id)
 			if config.Cfg.Pkts_per_sec > 0 {
-				r := tcps.Send_limiter.Reserve()
-				if !r.OK() {
-					logging.Println(4, nil, "Rate limit exceeded")
-				}
-				time.Sleep(r.Delay())
+				_ = tcps.Send_limiter.Take()
 			}
 			tcps.send_syn(id, dst_ip)
 		case <-tcps.Stop_chan:
@@ -481,8 +466,7 @@ func (tcps *Tcp_scanner) Start_scan(args []string, outpath string) {
 	tcps.L2_sender = &tcps.L2
 	tcps.Scanner_methods = tcps
 	tcps.Base_methods = tcps
-	// before running the script run below iptables command so that kernel doesn't send out RSTs
-	// sudo iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP > /dev/null 2>&1 || sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+	tcps.Set_iptable_rule()
 	// write start ts to log
 	logging.Write_to_runlog("START " + time.Now().UTC().String())
 	// command line args
@@ -494,31 +478,12 @@ func (tcps *Tcp_scanner) Start_scan(args []string, outpath string) {
 	var fname string
 	var netip net.IP
 	var hostsize int
-	fname, netip, hostsize = tcps.Get_cidr_filename(args[0])
+	fname, netip, hostsize = common.Get_cidr_filename(args[0])
 
 	// set the DNS_PAYLOAD_SIZE once as it is static
 	_, _, dns_payload := tcps.Build_ack_with_dns(net.ParseIP("0.0.0.0"), 0, 0, 0)
 	tcps.DNS_PAYLOAD_SIZE = uint16(len(dns_payload))
-	// start packet capture
-	handle, err := pcapgo.NewEthernetHandle(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	defer handle.Close()
-
-	iface, err := net.InterfaceByName(config.Cfg.Iface_name)
-	if err != nil {
-		panic(err)
-	}
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, fmt.Sprint("tcp and ip dst ", config.Cfg.Iface_ip, " and src port 53"))
-	if err != nil {
-		panic(err)
-	}
-	bpf_raw := bpfutils.ToBpfRawInstructions(bpf_instr)
-	if err := handle.SetBPF(bpf_raw); err != nil {
-		panic(err)
-	}
-
+	handle := common.Get_ether_handle()
 	// start packet capture as goroutine
 	tcps.Wg.Add(5)
 	go tcps.Packet_capture(handle)
@@ -531,13 +496,14 @@ func (tcps *Tcp_scanner) Start_scan(args []string, outpath string) {
 		logging.Println(3, nil, "running in CIDR mode")
 		go tcps.gen_ips(netip, hostsize)
 	}
-	for i := 0; i < 8; i++ {
+	for i := 0; i < int(config.Cfg.Number_routines); i++ {
 		tcps.Wg.Add(1)
 		go tcps.init_tcp()
 	}
 	go tcps.Close_handle(handle)
 	tcps.Wg.Wait()
-	logging.Println(3, nil, "all routines finished")
+	logging.Println(3, "Teardown", "all routines finished")
+	tcps.Remove_iptable_rule()
 	logging.Write_to_runlog("END " + time.Now().UTC().String())
 	logging.Println(3, nil, "program done")
 }
