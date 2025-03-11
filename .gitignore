@@ -1,0 +1,7 @@
+__pycache__/
+output_selenium/
+*.json
+*.csv
+.venv/
+keys.py
+*.log
