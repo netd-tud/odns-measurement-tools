@@ -67,6 +67,8 @@ type Cfg_db struct {
 	Rate_mode string `yaml:"rate_mode" env-default:"direct"`
 	// in ms, how long to test each send rate of the rate curve for
 	Rate_increase_interval int `yaml:"rate_increase_interval" env-default:"2000"`
+	// in ms, how long to wait for incoming packets
+	Rate_wait_interval int `yaml:"rate_wait_interval" env-default:"150"`
 	// use the below defined receive threshold to prematurely end the test
 	Rate_ignore_threshold bool `yaml:"rate_ignore_threshold" env-default:"false"`
 	// receive threshold: between 0 and 1, defines what percentage of the outgoing packet rate must be received again to

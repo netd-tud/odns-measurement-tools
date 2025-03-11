@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	ratelimiter "go.uber.org/ratelimit"
 )
 
@@ -52,7 +52,7 @@ type rate_curve_pair_s struct {
 	duration       int
 	tx_rate        float64
 	rx_rate        float64
-	spread         float64
+	loss           float64
 }
 
 type rate_data_s struct {
@@ -61,6 +61,7 @@ type rate_data_s struct {
 	rate_limiter        ratelimiter.Limiter // current rate limiter
 	rate_curve_pair     []rate_curve_pair_s
 	moving_sent_packets int
+	first_response_ts   int64
 }
 
 type Resolver_entry struct {
@@ -99,33 +100,62 @@ type Rate_tester struct {
 	singleip           bool
 }
 
-func (entry *rate_data_s) calc_last_second_rate(target_rate float64, duration int) {
+func (entry *rate_data_s) calc_last_second_rate(target_rate float64, duration_send int, duration_timeout int) {
 	now := time.Now().UnixMicro()
-	// calculate avg receive rate
-	ans_len := len(entry.answer_data) - 1
-	i := ans_len
-	for ; i >= 0; i-- {
-		if entry.answer_data[i].ts < now-int64(duration)*1000 {
-			break
+	//                                  tx_start+rx_timeout(2)
+	//              |<--- rx_timeout-------->|                        |<--- rx_timeout-------->|
+	// .............|.............|...................................|.............|..........|...............> time
+	//            tx_start(1)  first_resp                           tx_end       last_resp   rx_end(~now)
+	//                            |<--------- rx_time ----------------------------->|
+	//              |<----------------- tx_time --------------------->|
+	//              |<----------------rx_recording-------------------------------------------->|
+	//
+	// if first response happens between (1) and (2), then rx_start_ts should be moved
+	//                            |<---------|
+	//                     rx_start_ts'    rx_start_ts     rx_end_ts=rx_start_ts+duration_send
+	//
+	var no_rx_pkts int
+	if entry.first_response_ts != -1 {
+		var rx_start_ts int64 = now - int64(duration_send)*1000
+		if entry.first_response_ts > now-int64(duration_send+duration_timeout)*1000 &&
+			entry.first_response_ts < now-int64(duration_send)*1000 {
+			rx_start_ts = entry.first_response_ts
 		}
+		var rx_end_ts int64 = rx_start_ts + int64(duration_send)*1000
+
+		// count received packets
+		for i := len(entry.answer_data) - 1; i >= 0; i-- {
+			if entry.answer_data[i].ts < rx_start_ts {
+				break
+			}
+			if entry.answer_data[i].ts < rx_end_ts {
+				no_rx_pkts++
+			}
+		}
+	} else {
+		no_rx_pkts = 0
 	}
+
 	entry.rate_curve_pair = append(entry.rate_curve_pair, rate_curve_pair_s{
 		target_tx_rate: target_rate,
-		duration:       duration,
-		rx_rate:        float64(ans_len-i) / float64(duration) * 1000,
-		tx_rate:        float64(entry.moving_sent_packets) / float64(duration) * 1000,
-		spread:         float64(entry.moving_sent_packets-ans_len+i) / float64(duration) * 1000,
+		duration:       duration_send,
+		rx_rate:        float64(no_rx_pkts) / float64(duration_send) * 1000,
+		tx_rate:        float64(entry.moving_sent_packets) / float64(duration_send) * 1000,
+		loss:           float64(entry.moving_sent_packets-no_rx_pkts) / float64(duration_send) * 1000,
 	})
+	logging.Println(6, "Calc-Last-Rate", "# of tx:", entry.moving_sent_packets, "| # of rx:", no_rx_pkts)
 	entry.moving_sent_packets = 0
+	entry.first_response_ts = -1
 }
 
 func (tester *Rate_tester) write_results(out_path string) {
 	formatted_ts := time.Now().UTC().Format("2006-01-02_15-04-05")
-	out_path = path.Join(out_path, fmt.Sprintf("%s_rm-%s_dm-%s_incr-%sms_max-rate-%spps-port%s",
+	out_path = path.Join(out_path, fmt.Sprintf("%s_rm-%s_dm-%s_incr-%sms_wait%sms_max-rate-%spps-port%s",
 		formatted_ts,
 		config.Cfg.Rate_mode,
 		config.Cfg.Domain_mode,
 		strconv.Itoa(config.Cfg.Rate_increase_interval),
+		strconv.Itoa(config.Cfg.Rate_wait_interval),
 		strconv.Itoa(tester.rate_curve[len(tester.rate_curve)-1]),
 		strconv.Itoa((int)(config.Cfg.Dst_port))),
 	)
@@ -165,7 +195,7 @@ func (tester *Rate_tester) write_results(out_path string) {
 			csvfile.Close()
 
 			// write rate data
-			// format: target-tx-rate, tx-rate, rx-rate, spread
+			// format: target-tx-rate, tx-rate, rx-rate, loss
 			csvfile, err = os.Create(path.Join(out_path, "ratelimit_record_"+entry.resolver_ip.String()+".csv"))
 			if err != nil {
 				panic(err)
@@ -178,7 +208,7 @@ func (tester *Rate_tester) write_results(out_path string) {
 				record = append(record, strconv.Itoa((int)(math.Round(data_pair.target_tx_rate))))
 				record = append(record, strconv.Itoa((int)(math.Round(data_pair.tx_rate))))
 				record = append(record, strconv.Itoa((int)(math.Round(data_pair.rx_rate))))
-				record = append(record, strconv.Itoa((int)(math.Round(data_pair.spread))))
+				record = append(record, strconv.Itoa((int)(math.Round(data_pair.loss))))
 				csv_writer.Write(record)
 			}
 			csv_writer.Flush()
@@ -364,6 +394,7 @@ func (tester *Rate_tester) read_forwarders(fname string) bool {
 				rate_pos:    0,
 				rate_data:   make([]rate_data_s, 1),
 			}
+			tester.resolver_data[key].rate_data[0].first_response_ts = -1
 			resolver_entry = tester.resolver_data[key]
 		}
 		if config.Cfg.Rate_response_ip_only {
@@ -434,7 +465,8 @@ func (tester *Rate_tester) rate_test_target_sub(id int, entry *Resolver_entry, s
 		(*dnsid)++
 		_ = entry.rate_data[subid].rate_limiter.Take()
 	}
-	entry.rate_data[subid].calc_last_second_rate(float64(tester.rate_curve[entry.rate_pos]), config.Cfg.Rate_increase_interval)
+	time.Sleep(time.Duration(config.Cfg.Rate_wait_interval) * time.Millisecond)
+	entry.rate_data[subid].calc_last_second_rate(float64(tester.rate_curve[entry.rate_pos]), config.Cfg.Rate_increase_interval, config.Cfg.Rate_wait_interval)
 	logging.Println(6, "Sender "+strconv.Itoa(id)+"-"+strconv.Itoa(subid), "last calculated rate is", entry.rate_data[subid].rate_curve_pair[len(entry.rate_data[subid].rate_curve_pair)-1].rx_rate)
 	// set rate limiter to next value
 	if entry.rate_pos == len(tester.rate_curve)-1 {
@@ -504,7 +536,7 @@ func (tester *Rate_tester) rate_test_target(id int, entry *Resolver_entry) {
 		curve_pair.duration = -1
 		curve_pair.rx_rate = 0
 		curve_pair.tx_rate = 0
-		curve_pair.spread = 0
+		curve_pair.loss = 0
 		for _, rate_data := range entry.rate_data {
 			if len(rate_data.rate_curve_pair) <= entry.rate_pos {
 				continue
@@ -516,7 +548,7 @@ func (tester *Rate_tester) rate_test_target(id int, entry *Resolver_entry) {
 			}
 			curve_pair.rx_rate += sub_curve_pair.rx_rate
 			curve_pair.tx_rate += sub_curve_pair.tx_rate
-			curve_pair.spread += sub_curve_pair.spread
+			curve_pair.loss += sub_curve_pair.loss
 		}
 		if entry.acc_max_rate.rx_rate < curve_pair.rx_rate {
 			entry.acc_max_rate = curve_pair
@@ -545,13 +577,13 @@ func (tester *Rate_tester) rate_test_target(id int, entry *Resolver_entry) {
 			"\n    target-tx-rate:", math.Round(curve_pair.target_tx_rate),
 			"Pkts/s\n    tx-rate:", math.Round(curve_pair.tx_rate),
 			"Pkts/s\n    rx-rate:", math.Round(curve_pair.rx_rate),
-			"Pkts/s\n    spread (tx-rx):", math.Round(curve_pair.spread), "Pkts/s", "rel:", math.Round(curve_pair.spread/curve_pair.tx_rate*100), "%")
+			"Pkts/s\n    loss (tx-rx):", math.Round(curve_pair.loss), "Pkts/s", "rel:", math.Round(curve_pair.loss/curve_pair.tx_rate*100), "%")
 	}
 	logging.Println(3, "Sender "+strconv.Itoa(id),
 		"\n    === Resolver", entry.resolver_ip, "[overall]",
 		"Pkts/s\n    tx-rate @max-rx-rate:", math.Round(entry.acc_max_rate.tx_rate),
 		"Pkts/s\n    max-rx-rate:", math.Round(entry.acc_max_rate.rx_rate),
-		"Pkts/s\n    spread (tx-rx) @max-rx-rate:", math.Round(entry.acc_max_rate.spread), "Pkts/s", "rel:", math.Round(entry.acc_max_rate.spread/entry.acc_max_rate.tx_rate*100), "%")
+		"Pkts/s\n    loss (tx-rx) @max-rx-rate:", math.Round(entry.acc_max_rate.loss), "Pkts/s", "rel:", math.Round(entry.acc_max_rate.loss/entry.acc_max_rate.tx_rate*100), "%")
 	// TODO test stability at max rate, add config variable
 }
 
@@ -586,6 +618,7 @@ func (tester *Rate_tester) send_packets(id int) {
 			entry.rate_data = make([]rate_data_s, len(entry.tfwd_ips))
 			for i := 0; i < len(entry.tfwd_ips); i++ {
 				entry.rate_data[i].rate_limiter = ratelimiter.New(tester.rate_curve[0])
+				entry.rate_data[i].first_response_ts = -1
 				act_key := Active_key{port: uint16(int(outport) + i)}
 				tester.active_resolvers[act_key] = entry
 			}
@@ -594,6 +627,7 @@ func (tester *Rate_tester) send_packets(id int) {
 			rlimiter := ratelimiter.New(tester.rate_curve[0])
 			for i := 0; i < int(config.Cfg.Rate_subroutines); i++ {
 				entry.rate_data[i].rate_limiter = rlimiter
+				entry.rate_data[i].first_response_ts = -1
 				act_key := Active_key{port: uint16(int(outport) + i)}
 				tester.active_resolvers[act_key] = entry
 			}
@@ -624,36 +658,37 @@ func (tester *Rate_tester) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 
 	udp_layer := pkt.Layer(layers.LayerTypeUDP)
 	if udp_layer == nil {
+		logging.Println(6, "Handle-Pkt", "wrong udp layer")
 		return
 	}
 	udp, ok := udp_layer.(*layers.UDP)
 	if !ok { // skip wrong packets
-		return
-	}
-	// pkts w/o content will be dropped
-	if pkt.ApplicationLayer() == nil {
+		logging.Println(6, "Handle-Pkt", "wrong udp")
 		return
 	}
 
-	logging.Println(6, nil, "received data")
+	logging.Println(6, "Handle-Pkt", "received data")
 	// decode as DNS Packet
 	dns := &layers.DNS{}
 	pld := udp.LayerPayload()
 	err := dns.DecodeFromBytes(pld, gopacket.NilDecodeFeedback)
 	if err != nil {
-		logging.Println(5, nil, "DNS not found")
+		logging.Println(5, "Handle-Pkt", "error decoding DNS:", err)
 		return
 	}
-	logging.Println(6, nil, "got DNS response")
+	//logging.Println(6, nil, "got DNS response", count)
 	if dns.ResponseCode == layers.DNSResponseCodeNotImp {
+		logging.Println(5, "Handle-Pkt", "DNS response code: not implemented")
 		return
 	}
 	if len(dns.Answers) == 0 {
 		//ignore empty replies
+		logging.Println(5, "Handle-Pkt", "DNS empty answers")
 		return
 	}
-	for _, answer := range dns.Answers {
-		if answer.Type == layers.DNSTypeHINFO {
+	if len(dns.Answers) == 1 {
+		if dns.Answers[0].Type == layers.DNSTypeHINFO {
+			logging.Println(6, "Handle-Pkt", "DNS reply is HINFO")
 			return
 		}
 	}
@@ -662,7 +697,7 @@ func (tester *Rate_tester) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 	rate_entry, ok := tester.active_resolvers[Active_key{port: uint16(udp.DstPort)}]
 	if !ok {
 		tester.resolver_mu.Unlock()
-		logging.Println(6, nil, "got DNS but cant find related resolver")
+		logging.Println(5, "Handle-Pkt", "got DNS but cant find related resolver")
 		return
 	}
 	subid := uint16(udp.DstPort) - rate_entry.outport
@@ -673,6 +708,9 @@ func (tester *Rate_tester) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 		dns_payload_size: len(pld),
 	}
 	rate_entry.rate_data[subid].answer_data = append(rate_entry.rate_data[subid].answer_data, ans_entry)
+	if rate_entry.rate_data[subid].first_response_ts == -1 {
+		rate_entry.rate_data[subid].first_response_ts = rec_time
+	}
 	rate_entry.rate_data[subid].answer_mu.Unlock()
 }
 

@@ -12,8 +12,8 @@ class OutputItem:
     target_ip: ip_address
     response_ip: ip_address
     arecord: ip_address # if the control ip is not present the entire item is removed from output frame
-    timestamp: str
-    timestamp_response: str
+    timestamp_req: str
+    timestamp_resp: str
     integrity: bytes # 0 0 0 0 0 SYN SYN-ACK (FIN)-PSH-ACK ==> must be 7 in the end
     odns_type: str
 
@@ -61,7 +61,7 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
         # we shall have a SYN
         if split[InPos.FLAGS.value] == "S":
             outitem.target_ip = ip_address(split[InPos.IP.value])
-            outitem.timestamp = split[InPos.TS.value]
+            outitem.timestamp_req = split[InPos.TS.value]
             outitem.integrity = outitem.integrity | 0x4
 	    # a SYN-ACK
         elif split[InPos.FLAGS.value] == "SA":
@@ -69,7 +69,7 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
 	    # and a PSH-ACK or FIN-PSH-ACK
         elif split[InPos.FLAGS.value] == "PA" or split[InPos.FLAGS.value] == "FPA":
             outitem.response_ip = ip_address(split[InPos.IP.value])
-            outitem.timestamp_response = split[InPos.TS.value]
+            outitem.timestamp_resp = split[InPos.TS.value]
             arecs = split[InPos.RECS.value].split(",")
             # there should be two entries, one of them the control ip
             if len(arecs) != 2:
@@ -89,5 +89,12 @@ with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
 with gzip.open(save_fname, "wt", encoding="utf-8") as out_file:
     for id, item in output_df.items():
         if item.integrity == 0x7:
-            out_file.write(f"{id};{item.target_ip};{item.response_ip};{item.arecord};{item.odns_type};{item.timestamp};{item.timestamp_response}\n")
+            out_file.write(f"{id}"
+                           f";{item.target_ip}"
+                           f";{item.response_ip}"
+                           f";{item.arecord}"
+                           f";{item.odns_type}"
+                           f";{item.timestamp_req}"
+                           f";{item.timestamp_resp}"
+                           "\n")
         #else: print(f"integrity failing for {id},{item}")

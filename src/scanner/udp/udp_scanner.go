@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	ratelimiter "go.uber.org/ratelimit"
 )
 
@@ -61,7 +61,7 @@ func (udps *Udp_scanner) update_sync_init() (uint32, uint16, uint16) {
 // this struct contains all relevant data to track the dns query & response
 type Udp_scan_data_item struct {
 	Id               uint32
-	Ts               time.Time
+	Ts_req           time.Time
 	Ts_resp          time.Time
 	Ip               net.IP
 	Answerip         net.IP
@@ -74,7 +74,7 @@ type Udp_scan_data_item struct {
 }
 
 func (u *Udp_scan_data_item) Get_timestamp() time.Time {
-	return u.Ts
+	return u.Ts_req
 }
 
 func (u *Udp_scan_data_item) String() string {
@@ -118,7 +118,7 @@ func scan_item_to_strarr(scan_item *Udp_scan_data_item) []string {
 		}
 	}
 	record = append(record, dns_answers)
-	record = append(record, scan_item.Ts.UTC().Format("2006-01-02 15:04:05.000000"))
+	record = append(record, scan_item.Ts_req.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.Ts_resp.UTC().Format("2006-01-02 15:04:05.000000"))
 	record = append(record, scan_item.Port.String())
 	record = append(record, strconv.Itoa((int)(scan_item.Dnsid)))
@@ -151,7 +151,7 @@ func (udps *Udp_scanner) send_dns(id uint32, dst_ip net.IP, src_port layers.UDPP
 	udps.Scan_data.Mu.Lock()
 	s_d_item := Udp_scan_data_item{
 		Id:       id,
-		Ts:       time.Now(),
+		Ts_req:   time.Now(),
 		Ip:       dst_ip,
 		Port:     src_port,
 		Dns_recs: []layers.DNSResourceRecord{},
