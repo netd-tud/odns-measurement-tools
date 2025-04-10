@@ -1,0 +1,4 @@
+[submodule "onesixtyone"]
+	path = src/fingerprinting/onesixtyone
+	url = https://github.com/f10d0/onesixtyone
+	branch = more-hosts

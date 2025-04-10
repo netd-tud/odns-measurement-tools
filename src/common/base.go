@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcapgo"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 	ratelimiter "go.uber.org/ratelimit"
 )
 
@@ -174,14 +174,14 @@ func (st *Base) Process_pkt(pkt gopacket.Packet) {
 					last_seen = true
 				}
 				if int(ip_frag.FragOffset)<<3 == len(transp_pkt) {
-					logging.Println(7, "Adding Layer Payload at offset", len(transp_pkt), ", layer payload size:", len(fragpkt.ApplicationLayer().Payload()))
+					logging.Println(7, "Process-Pkt", "adding Layer Payload at offset", len(transp_pkt), ", layer payload size:", len(fragpkt.ApplicationLayer().Payload()))
 					transp_pkt = append(transp_pkt, ip_frag.LayerPayload()...)
 					frag_seen = true
 					break
 				}
 			}
 			if !frag_seen {
-				logging.Println(6, "Process-Pkt", "fragment not seen, transp_size:", len(transp_pkt))
+				logging.Println(7, "Process-Pkt", "fragment not seen, transp_size:", len(transp_pkt))
 				st.fragbuf.mu.Unlock()
 				return
 			}
@@ -196,7 +196,7 @@ func (st *Base) Process_pkt(pkt gopacket.Packet) {
 		delete(st.fragbuf.fragmap, ip.Id)
 		st.fragbuf.mu.Unlock()
 
-		logging.Println(7, "Process-Pkt", "all fragments seen")
+		logging.Println(6, "Process-Pkt", "all fragments seen")
 		switch ip.Protocol {
 		case layers.IPProtocolUDP:
 			pkt = gopacket.NewPacket(transp_pkt, layers.LayerTypeUDP, gopacket.Default)

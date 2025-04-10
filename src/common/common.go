@@ -9,11 +9,11 @@ import (
 	"net"
 	"strings"
 
-	"github.com/breml/bpfutils"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/pcapgo"
+	"github.com/f10d0/bpfutils"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcap"
+	"github.com/gopacket/gopacket/pcapgo"
 )
 
 var Opts gopacket.SerializeOptions = gopacket.SerializeOptions{
@@ -52,9 +52,10 @@ func Get_ether_handle() *pcapgo.EthernetHandle {
 	if err != nil {
 		panic(err)
 	}
-	filter_string := fmt.Sprint("ip dst ", config.Cfg.Iface_ip) //, " and src port ", config.Cfg.Dst_port , " and ", prot)
+	// cannot filter for src port and protocol here, since the packets could be fragmented and would be dropped by the filter
+	filter_string := fmt.Sprint("ip dst ", config.Cfg.Iface_ip)
 	logging.Println(5, "Handle", "filter string:", filter_string)
-	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU, filter_string)
+	bpf_instr, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, iface.MTU+14, filter_string)
 	if err != nil {
 		panic(err)
 	}

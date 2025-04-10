@@ -31,8 +31,15 @@ class OutputItem:
     target_ip: ip_address
     response_ip: ip_address
     arecord: ip_address
-    timestamp: str
     odns_type: str
+    timestamp_req: str
+    timestamp_resp: str
+    port: int
+    dnsid: int
+    dns_pkt_size: int
+    dns_rrs: str
+    dns_flags: int
+    dns_ttl: int
 
     def classify(self):
         if self.response_ip != self.target_ip:
@@ -60,17 +67,34 @@ class GoPos(Enum):
     TARGET_IP = 1
     RESP_IP   = 2
     AREC_IP   = 3
-    TS        = 4
+    TS_REQ    = 4
+    TS_RESP   = 5
+    PORT      = 6
+    DNSID     = 7
+    PKT_SIZE  = 8
+    RRS       = 9
+    FLAGS     = 10
+    DNS_TTL   = 11
+
 
 def writer_thread(save_fname: str):
     # writeout
     with open(save_fname, "w", encoding="utf-8") as out_file:
         print("writer file opened")
         while True:
-            item = QUEUE.get()
+            item: OutputItem = QUEUE.get()
             if item is None: # sentinel
                 break
-            out_file.write(f"{item.id};{item.target_ip};{item.response_ip};{item.arecord};{item.odns_type};{item.timestamp}\n")
+            out_file.write(f"{id}"
+                           f";{item.target_ip}"
+                           f";{item.response_ip}"
+                           f";{item.arecord}"
+                           f";{item.odns_type}"
+                           f";{item.timestamp_req}"
+                           f";{item.timestamp_resp}"
+                           f";{item.dns_flags}"
+                           f";{item.dns_ttl}"
+                           "\n")
 
 def process_go_results(load_fname: str):
     with gzip.open(load_fname, 'rt', encoding="utf-8") as input_file:
@@ -90,7 +114,15 @@ def process_go_results(load_fname: str):
                     ip_address(split[GoPos.TARGET_IP.value]),
                     ip_address(split[GoPos.RESP_IP.value]),
                     arecord,
-                    split[GoPos.TS.value],"")
+                    split[GoPos.TS_REQ.value],
+                    split[GoPos.TS_RESP.value] if len(split) >= 6 else "",
+                    split[GoPos.PORT.value] if len(split) >= 7 else -1,
+                    split[GoPos.DNSID.value] if len(split) >= 8 else -1,
+                    split[GoPos.PKT_SIZE.value] if len(split) >= 9 else -1,
+                    split[GoPos.RRS.value] if len(split) >= 10 else "",
+                    split[GoPos.FLAGS.value] if len(split) >= 11 else -1,
+                    split[GoPos.DNS_TTL.value] if len(split) >= 12 else -1
+                )
                 outitem.classify()
                 QUEUE.put(outitem)
             except ValueError:
