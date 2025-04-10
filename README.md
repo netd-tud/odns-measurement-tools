@@ -33,15 +33,17 @@ The data of the last scan can be accessed via an API on https://odns-data.netd.c
   -q, --qname [string]
       overwrites the dns query name
   -port [int]
-      overwrites the port
+      overwrites the destination port (typically 53)
 ```
 
-## DNS over TCP
+## Internet-wide DNS scanning
+
+### DNS over TCP
 
 **Setup:**
 Modify the config accordingly (set your interface name and IP-address).
 
-The config template is located at ` src/scanner/tcp/config.yml.template`
+The config template is located at `src/scanner/tcp/config.yml.template`
 
 **Run the scan:**
 ```
@@ -58,12 +60,12 @@ Transform the data into a format useful for classification:
 python3 src/postprocessing/postproc_data_tcp_pure.py <input_file> <output_file>
 ```
 
-## DNS over UDP
+### DNS over UDP
 
 **Setup:**
 Modify the config accordingly (set your interface name and IP-address).
 
-The config template is located at ` src/scanner/udp/config.yml.template`
+The config template is located at `src/scanner/udp/config.yml.template`
 
 The port range can also be specified in the config. By default the range lies outside the Linux ephemeral port range (random port range) used by normal applications.
 
@@ -93,17 +95,43 @@ As soon as a SYN/ACK arrives, the tool starts to send DNS requests over TCP with
 **Run the traceroute**
 ```
 cd src
-sudo go run dns_tool.go --mode traceroute --protocol tcp [target-ip|path-to-list-of-ips]
+sudo go run dns_tool.go --mode traceroute --protocol tcp --config scanner/traceroute/config.yml [target-ip|path-to-list-of-ips]
 ```
 
-## DNS Rate Limit Testing
+## DNS Rate Limit & Performance Testing
 
-**Run the test**\
-This requires:
-- `scanner/udp/config_uniq.yml` with a reduced scan rate
-- `ratelimit/config.yml` specifying a `rate_curve` and `dynamic_domain` (see ratelimit/config.yml.template)
+This component allows for rate limit and performance testing of DNS resolvers.
+A specialized configuration and input file is required to run the tests.
+The configuration template is located under ` src/ratelimit/config.yml.template`.
+Please refer to [config.go](src/config/config.go) for an explanation of each parameter that can be adjusted.
+
+**To run the rate limit testing:**\
+The input file needs to be in a .csv.gz format, containing two columns: `ip_request` and `ip_response`.
+The header needs to be present in the input file.
+`ip_request` will be used as target IPs for the rate limit testing while they are grouped by their `ip_response` value respectively.
+If `rate_response_ip_only` is set to `true` in the `config.yml` file, the `ip_response` column will be used as target addresses during the test, and the `ip_request` column can be dropped.
+
+Either this can be done with the last UDP scan as follows:
 ```
 cd src
 sudo ratelimit/check_pub_resolvers.sh [in: last udp scan] [out: intermediate resolver scan file] [out: intersect file]
 ```
-Results will be in `ratelimit_results/<timestamp>/`
+
+Or directly:
+```
+cd src
+sudo go run dns_tool.go --mode ratelimit --config scanner/ratelimit/config.yml input.csv.gz
+```
+
+**To test the performance of a single resolver:**\
+It sufficies to set the desired configuration and run the following:
+```
+cd src
+sudo go run dns_tool.go --mode ratelimit --config scanner/ratelimit/config.yml <1.2.3.4>
+```
+
+Results will be in `ratelimit_results/<timestamp>_<config-settings>/`
+
+# Fingerprinting
+Fingerprinting of device vendor and model may be performed for ODNS components.
+Please refer to [fingerprinting](src/fingerprinting/README.md) for any further instructions.
