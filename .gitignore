@@ -15,3 +15,7 @@ ratelimit_results/
 *.txt.gz
 *.pcapng
 dns_tools
+__pycache__/
+output_selenium/
+*.json
+keys.py
