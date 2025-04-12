@@ -114,6 +114,7 @@ def process_go_results(load_fname: str):
                     ip_address(split[GoPos.TARGET_IP.value]),
                     ip_address(split[GoPos.RESP_IP.value]),
                     arecord,
+                    "",
                     split[GoPos.TS_REQ.value],
                     split[GoPos.TS_RESP.value] if len(split) >= 6 else "",
                     split[GoPos.PORT.value] if len(split) >= 7 else -1,
