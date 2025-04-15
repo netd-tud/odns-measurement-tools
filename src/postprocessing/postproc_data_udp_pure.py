@@ -85,7 +85,7 @@ def writer_thread(save_fname: str):
             item: OutputItem = QUEUE.get()
             if item is None: # sentinel
                 break
-            out_file.write(f"{id}"
+            out_file.write(f"{item.id}"
                            f";{item.target_ip}"
                            f";{item.response_ip}"
                            f";{item.arecord}"
