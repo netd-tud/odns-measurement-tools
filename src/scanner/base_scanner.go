@@ -43,6 +43,7 @@ type Base_scanner struct {
 	Scan_data            root_scan_data
 	Result_data_internal []Scan_data_item
 	Scanner_methods      IScanner_Methods
+	Followups            *Follow_ups
 }
 
 func (bs *Base_scanner) Scanner_init() {
@@ -59,6 +60,7 @@ func (bs *Base_scanner) Scanner_init_internal() {
 		Items: make(map[scan_item_key]Scan_data_item),
 	}
 	bs.Result_data_internal = make([]Scan_data_item, 0)
+	bs.Followups = nil
 	bs.Exclude_ips()
 }
 
@@ -197,5 +199,6 @@ func (bs *Base_scanner) Read_ips_file(fname string) {
 	bs.Waiting_to_end = true
 	// time to wait until end based on packet rate + channel size
 	time.Sleep(time.Duration(wait_time) * time.Second)
+	bs.Wait_followups()
 	close(bs.Stop_chan)
 }

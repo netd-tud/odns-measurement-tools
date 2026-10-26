@@ -3,6 +3,15 @@ iface_ip: <ip>
 dst_port: 53
 dns_query: <domain>
 dns_query_type: A
+# Optional follow-up questions after a DNS response. Empty/omitted disables them.
+# Matching target/response IP: RD=1; differing IPs: RD=1 and RD=0 per question.
+# follow_up_queries:
+#   - name: version.bind
+#     type: TXT
+#     class: CH
+#   - name: version.server
+#     type: TXT
+#     class: CH
 dnssec_enabled: false
 log_dnsrecs: false
 ends0_enabled: false

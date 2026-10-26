@@ -7,6 +7,7 @@ import (
 	"dns_tools/generator"
 	"dns_tools/logging"
 	"dns_tools/scanner"
+	"encoding/binary"
 	"log"
 	"math"
 	"math/rand"
@@ -22,6 +23,7 @@ import (
 type Tcp_scanner struct {
 	scanner.Base_scanner
 	tcp_common.Tcp_sender
+	send_packet func(layers.IPv4, layers.TCP, []byte)
 }
 
 /*	id:
@@ -44,6 +46,8 @@ type tcp_scan_data_item struct {
 	flags    tcp_common.TCP_flags
 	dns_recs []net.IP
 	Next     *tcp_scan_data_item
+
+	followups_started bool
 }
 
 func (t *tcp_scan_data_item) Get_timestamp() time.Time {
@@ -65,6 +69,11 @@ type tcp_scan_item_key struct {
 }
 
 func (tcps *Tcp_scanner) Build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) (layers.IPv4, layers.TCP, []byte) {
+	return tcps.Build_ack_with_question(dst_ip, src_port, seq_num, ack_num,
+		layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSTypeA, Class: layers.DNSClassIN}, uint16(rand.Intn(65536)), true)
+}
+
+func (tcps *Tcp_scanner) Build_ack_with_question(dst_ip net.IP, src_port layers.TCPPort, seq_num, ack_num uint32, qst layers.DNSQuestion, dnsid uint16, rd bool) (layers.IPv4, layers.TCP, []byte) {
 	// === build packet ===
 	// Create ip layer
 	ip := layers.IPv4{
@@ -89,17 +98,12 @@ func (tcps *Tcp_scanner) Build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPo
 	tcp.SetNetworkLayerForChecksum(&ip)
 
 	// create dns layers
-	qst := layers.DNSQuestion{
-		Name:  []byte(config.Cfg.Dns_query),
-		Type:  layers.DNSTypeA,
-		Class: layers.DNSClassIN,
-	}
 	dns := layers.DNS{
 		Questions: []layers.DNSQuestion{qst},
-		RD:        true,
+		RD:        rd,
 		QDCount:   1,
 		OpCode:    layers.DNSOpCodeQuery,
-		ID:        uint16(rand.Intn(65536)),
+		ID:        dnsid,
 	}
 
 	dns_buf := gopacket.NewSerializeBuffer()
@@ -107,8 +111,7 @@ func (tcps *Tcp_scanner) Build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPo
 	// prepend dns payload with its size, as gopacket does not do this automatically
 	dns_buf_bytes := dns_buf.Bytes()
 	dns_corrected := make([]byte, len(dns_buf_bytes)+2)
-	dns_corrected[0] = uint8(0)
-	dns_corrected[1] = uint8(len(dns_buf_bytes))
+	binary.BigEndian.PutUint16(dns_corrected[:2], uint16(len(dns_buf_bytes)))
 	for i := 0; i < len(dns_buf_bytes); i++ {
 		dns_corrected[i+2] = dns_buf_bytes[i]
 	}
@@ -116,7 +119,7 @@ func (tcps *Tcp_scanner) Build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPo
 }
 
 func (tcps *Tcp_scanner) Send_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) {
-	tcps.Send_tcp_pkt(tcps.Build_ack_with_dns(dst_ip, src_port, seq_num, ack_num))
+	tcps.send_tcp(tcps.Build_ack_with_dns(dst_ip, src_port, seq_num, ack_num))
 }
 
 func scan_item_to_strarr(scan_item *tcp_scan_data_item) []string {
@@ -174,12 +177,16 @@ func (tcps *Tcp_scanner) Write_item(root_item *scanner.Scan_data_item) {
 }
 
 func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
+	defer tcps.Track_followup_handler()()
 	tcp_layer := pkt.Layer(layers.LayerTypeTCP)
 	if tcp_layer == nil {
 		return
 	}
 	tcp_l, ok := tcp_layer.(*layers.TCP)
 	if !ok { // skip wrong packets
+		return
+	}
+	if tcps.handle_followup_pkt(ip, tcp_l) {
 		return
 	}
 	tcpflags := tcp_common.TCP_flags{
@@ -244,11 +251,11 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			last_data_item := tcp_root_data_item.last()
 			if !(last_data_item.flags.Is_PSH_ACK()) {
 				logging.Println(5, nil, "missing PSH-ACK, dropping")
-				tcps.Send_ack_pos_fin(ip.SrcIP, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, true)
+				tcps.send_ack_pos_fin(ip.SrcIP, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, true)
 				return
 			}
 			logging.Println(5, nil, "ACKing FIN-ACK")
-			tcps.Send_ack_pos_fin(tcp_root_data_item.ip, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, false)
+			tcps.send_ack_pos_fin(tcp_root_data_item.ip, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, false)
 			var switcheroo scanner.Scan_data_item = tcp_root_data_item
 			tcps.Write_chan <- &switcheroo
 		}
@@ -264,8 +271,8 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			return
 		}
 		// validate payload size
-		pld_size := int(tcp_l.LayerPayload()[0]) + int(tcp_l.LayerPayload()[1])<<8
-		if pld_size == len(tcp_l.LayerPayload())-2 {
+		pld_size := int(binary.BigEndian.Uint16(tcp_l.LayerPayload()[:2]))
+		if pld_size != len(tcp_l.LayerPayload())-2 {
 			return
 		}
 		pld := make([]byte, len(tcp_l.LayerPayload())-2)
@@ -299,6 +306,16 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			logging.Println(5, nil, "missing SYN-ACK")
 			return
 		}
+		// Follow-ups are independent of the primary scan's answer classification.
+		if tcps.Followups != nil && scanner.Match_question(dns, layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSTypeA, Class: layers.DNSClassIN}) {
+			tcps.Scan_data.Mu.Lock()
+			trigger := !tcp_root_data_item.followups_started
+			tcp_root_data_item.followups_started = true
+			tcps.Scan_data.Mu.Unlock()
+			if trigger {
+				tcps.Schedule_followups(tcp_root_data_item.id, tcp_root_data_item.ip, ip.SrcIP)
+			}
+		}
 		answers := dns.Answers
 		var answers_ip []net.IP
 		for _, answer := range answers {
@@ -328,7 +345,7 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 		}
 		last_data_item.Next = &data
 		// send FIN-ACK to server
-		tcps.Send_ack_pos_fin(tcp_root_data_item.ip, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, true)
+		tcps.send_ack_pos_fin(tcp_root_data_item.ip, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, true)
 		// if this pkt is fin-psh-ack we will remove it from the map at this point already
 		// because we wont receive any further fin-ack from the server
 		if tcpflags.Is_FIN_PSH_ACK() {
@@ -386,7 +403,7 @@ func (tcps *Tcp_scanner) send_syn(id uint32, dst_ip net.IP) {
 	}
 	tcp.SetNetworkLayerForChecksum(&ip)
 
-	tcps.Send_tcp_pkt(ip, tcp, nil)
+	tcps.send_tcp(ip, tcp, nil)
 }
 
 type u32id struct {
@@ -409,9 +426,13 @@ func (tcps *Tcp_scanner) get_next_id() uint32 {
 
 func (tcps *Tcp_scanner) init_tcp() {
 	defer tcps.Wg.Done()
+	defer tcps.Followup_sender_done()
 	for {
 		select {
-		case dst_ip := <-tcps.Ip_chan:
+		case dst_ip, ok := <-tcps.Ip_chan:
+			if !ok {
+				return
+			}
 			// check if ip is excluded in the blocklist
 			should_exclude := false
 			for _, blocked_net := range tcps.Blocked_nets {
@@ -457,15 +478,21 @@ func (tcps *Tcp_scanner) gen_ips(netip net.IP, hostsize int) {
 	tcps.Waiting_to_end = true
 	// time to wait until end based on packet rate + channel size
 	time.Sleep(time.Duration(wait_time) * time.Second)
+	tcps.Wait_followups()
 	close(tcps.Stop_chan)
 }
 
 func (tcps *Tcp_scanner) Start_scan(args []string, outpath string) {
+	if err := config.Cfg.Validate_followups(); err != nil {
+		panic(err)
+	}
 	tcps.Scanner_init()
 	tcps.Sender_init()
 	tcps.L2_sender = &tcps.L2
 	tcps.Scanner_methods = tcps
 	tcps.Base_methods = tcps
+	tcps.Start_followups(outpath, "tcp", tcps.send_followup)
+	defer tcps.Followups.Close()
 	tcps.Set_iptable_rule()
 	// write start ts to log
 	logging.Write_to_runlog("START " + time.Now().UTC().String())

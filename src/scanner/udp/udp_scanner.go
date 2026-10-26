@@ -30,6 +30,7 @@ type Udp_scanner struct {
 	// slice for sockets that will be bound on program start
 	bound_sockets []*net.UDPConn
 	ip_loop_id    synced_init
+	send_packet   func(layers.IPv4, layers.UDP, []byte)
 }
 
 // lockable datastructure for the init phase
@@ -71,6 +72,7 @@ type Udp_scan_data_item struct {
 	Dns_payload_size int
 	Dns_flags        uint16
 	Ttl              int
+	Followup         *scanner.Follow_up
 }
 
 func (u *Udp_scan_data_item) Get_timestamp() time.Time {
@@ -161,10 +163,11 @@ func (udps *Udp_scanner) send_dns(id uint32, dst_ip net.IP, src_port layers.UDPP
 	udps.Scan_data.Items[udp_scan_item_key{src_port, dnsid}] = &s_d_item
 	udps.Scan_data.Mu.Unlock()
 
-	udps.Send_udp_pkt(udps.Build_dns(dst_ip, src_port, dnsid, config.Cfg.Dns_query))
+	udps.send_udp(udps.Build_dns(dst_ip, src_port, dnsid, config.Cfg.Dns_query))
 }
 
 func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
+	defer udps.Track_followup_handler()()
 	udp_layer := pkt.Layer(layers.LayerTypeUDP)
 	if udp_layer == nil {
 		return
@@ -195,12 +198,22 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			udps.Scan_data.Mu.Unlock()
 			return
 		}
-		delete(udps.Scan_data.Items, udp_scan_item_key{udp.DstPort, dns.ID})
 		logging.Println(5, "Handle-Pkt", "found related scan item")
 		udp_scan_item, ok := scan_item.(*Udp_scan_data_item)
 		if !ok {
 			log.Fatal("cast failed, wrong type")
 		}
+		if udp_scan_item.Followup != nil || udps.Followups != nil {
+			question := layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSType(udps.DNS_type), Class: layers.DNSClassIN}
+			if udp_scan_item.Followup != nil {
+				question = udp_scan_item.Followup.Query.Question()
+			}
+			if !scanner.Match_question(dns, question) {
+				udps.Scan_data.Mu.Unlock()
+				return
+			}
+		}
+		delete(udps.Scan_data.Items, udp_scan_item_key{udp.DstPort, dns.ID})
 		udp_scan_item.Answerip = ip.SrcIP
 		udp_scan_item.Ts_resp = time.Now()
 		if len(dns.Answers) != 0 {
@@ -210,6 +223,11 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 		udp_scan_item.Dns_flags = (uint16)(udp.LayerPayload()[2])<<8 | (uint16)(udp.LayerPayload()[3])
 		udp_scan_item.Dns_payload_size = len(udp.LayerPayload())
 		udps.Scan_data.Mu.Unlock()
+		if udp_scan_item.Followup != nil {
+			udp_scan_item.Followup.Complete("response", ip.SrcIP, dns, pld)
+			return
+		}
+		udps.Schedule_followups(udp_scan_item.Id, udp_scan_item.Ip, ip.SrcIP)
 		// queue for writeout
 		udps.Write_chan <- &scan_item
 	} else {
@@ -219,9 +237,13 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 
 func (udps *Udp_scanner) init_udp() {
 	defer udps.Wg.Done()
+	defer udps.Followup_sender_done()
 	for {
 		select {
-		case dst_ip := <-udps.Ip_chan:
+		case dst_ip, ok := <-udps.Ip_chan:
+			if !ok {
+				return
+			}
 			// check if ip is excluded in the blocklist
 			should_exclude := false
 			for _, blocked_net := range udps.Blocked_nets {
@@ -289,10 +311,14 @@ func (udps *Udp_scanner) gen_ips_wait(netip net.IP, hostsize int) {
 	udps.Waiting_to_end = true
 	// time to wait until end based on packet rate + channel size
 	time.Sleep(time.Duration(wait_time) * time.Second)
+	udps.Wait_followups()
 	close(udps.Stop_chan)
 }
 
 func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
+	if err := config.Cfg.Validate_followups(); err != nil {
+		panic(err)
+	}
 	udps.Scanner_init()
 	udps.Sender_init()
 	udps.L2_sender = &udps.L2
@@ -305,6 +331,9 @@ func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
 		port:  config.Cfg.Port_min,
 		dnsid: 0,
 	}
+
+	udps.Start_followups(outpath, "udp", udps.send_followup)
+	defer udps.Followups.Close()
 
 	// write start ts to log
 	logging.Write_to_runlog("START " + time.Now().UTC().String())

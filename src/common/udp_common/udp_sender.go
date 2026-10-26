@@ -89,6 +89,17 @@ func (sender *Udp_sender) Send_udp_pkt(ip layers.IPv4, udp layers.UDP, payload [
 }
 
 func (sender *Udp_sender) Build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16, query string) (layers.IPv4, layers.UDP, []byte) {
+	return sender.build_dns(dst_ip, src_port, dnsid, layers.DNSQuestion{
+		Name: []byte(query), Type: layers.DNSType(sender.DNS_type), Class: layers.DNSClassIN,
+	}, true, true)
+}
+
+// Build_dns_question leaves EDNS/DNSSEC off for follow-up questions.
+func (sender *Udp_sender) Build_dns_question(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16, question layers.DNSQuestion, rd bool) (layers.IPv4, layers.UDP, []byte) {
+	return sender.build_dns(dst_ip, src_port, dnsid, question, rd, false)
+}
+
+func (sender *Udp_sender) build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16, qst layers.DNSQuestion, rd, initial bool) (layers.IPv4, layers.UDP, []byte) {
 	// === build packet ===
 	// Create ip layer
 	ip := layers.IPv4{
@@ -108,11 +119,6 @@ func (sender *Udp_sender) Build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsi
 	udp.SetNetworkLayerForChecksum(&ip)
 
 	// create dns layers
-	qst := layers.DNSQuestion{
-		Name:  []byte(query),
-		Type:  layers.DNSType(sender.DNS_type),
-		Class: layers.DNSClassIN,
-	}
 	optRecord := layers.DNSResourceRecord{
 		Type:  layers.DNSTypeOPT,
 		Class: 4096, // Typically used to indicate a UDP payload size (e.g., 4096 bytes)
@@ -123,12 +129,12 @@ func (sender *Udp_sender) Build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsi
 
 	dns := layers.DNS{
 		Questions: []layers.DNSQuestion{qst},
-		RD:        true,
+		RD:        rd,
 		QDCount:   1,
 		OpCode:    layers.DNSOpCodeQuery,
 		ID:        dnsid,
 	}
-	if config.Cfg.EDNS0_enabled || config.Cfg.Dnssec_enabled {
+	if initial && (config.Cfg.EDNS0_enabled || config.Cfg.Dnssec_enabled) {
 		dns.Additionals = []layers.DNSResourceRecord{optRecord}
 		dns.ARCount = 1
 	}

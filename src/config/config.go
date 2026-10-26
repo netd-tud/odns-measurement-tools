@@ -1,8 +1,51 @@
 package config
 
 import (
+	"fmt"
+	"strings"
+	"unicode"
+
+	"github.com/gopacket/gopacket/layers"
 	"github.com/ilyakaznacheev/cleanenv"
 )
+
+// Follow_up_query describes a DNS question; RD variants are selected by the scanner.
+type Follow_up_query struct {
+	Name  string `yaml:"name"`
+	Type  string `yaml:"type"`
+	Class string `yaml:"class"`
+}
+
+var queryTypes = map[string]layers.DNSType{
+	"A": layers.DNSTypeA, "AAAA": layers.DNSTypeAAAA,
+	"DNSKEY": layers.DNSTypeDNSKEY, "ANY": layers.DNSType(255), "TXT": layers.DNSTypeTXT,
+}
+
+var queryClasses = map[string]layers.DNSClass{"IN": layers.DNSClassIN, "CH": layers.DNSClass(3)}
+
+func (q Follow_up_query) Question() layers.DNSQuestion {
+	return layers.DNSQuestion{Name: []byte(strings.TrimSuffix(q.Name, ".")), Type: queryTypes[q.Type], Class: queryClasses[q.Class]}
+}
+
+func (cfg *Cfg_db) Validate_followups() error {
+	for i, q := range cfg.Follow_up_queries {
+		name := strings.TrimSuffix(q.Name, ".")
+		valid := name != "" && len(name) <= 253 && !strings.ContainsFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+		for _, label := range strings.Split(name, ".") {
+			valid = valid && len(label) > 0 && len(label) <= 63
+		}
+		if !valid {
+			return fmt.Errorf("follow_up_queries[%d]: invalid DNS name %q", i, q.Name)
+		}
+		if _, ok := queryTypes[q.Type]; !ok {
+			return fmt.Errorf("follow_up_queries[%d]: unsupported type %q", i, q.Type)
+		}
+		if _, ok := queryClasses[q.Class]; !ok {
+			return fmt.Errorf("follow_up_queries[%d]: unsupported class %q (use IN or CH)", i, q.Class)
+		}
+	}
+	return nil
+}
 
 // config
 type Cfg_db struct {
@@ -17,6 +60,8 @@ type Cfg_db struct {
 	Dns_query string `yaml:"dns_query"`
 	// dns query type (only UDP)
 	Dns_query_type string `yaml:"dns_query_type" env-default:"A"`
+	// Optional questions sent after an initial response, in standalone scan mode only.
+	Follow_up_queries []Follow_up_query `yaml:"follow_up_queries"`
 	// enable dnssec (only udp)
 	Dnssec_enabled bool `yaml:"dnssec_enabled" env-default:"false"`
 	// enable edns0 (only UDP)

@@ -2,6 +2,16 @@ iface_name: <iface>
 iface_ip: <ip>
 dst_port: 53
 dns_query: <domain>
+# Optional follow-up questions after a DNS response. Empty/omitted disables them.
+# Matching target/response IP: RD=1; differing IPs: RD=1 and RD=0 per question.
+# Each follow-up uses a fresh raw TCP connection.
+# follow_up_queries:
+#   - name: version.bind
+#     type: TXT
+#     class: CH
+#   - name: version.server
+#     type: TXT
+#     class: CH
 exclude_ips_fname: exclude_ips.txt
 pkts_per_sec: 100000
 verbosity: 3
