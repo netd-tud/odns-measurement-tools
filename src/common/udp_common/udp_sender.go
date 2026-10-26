@@ -94,7 +94,7 @@ func (sender *Udp_sender) Build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsi
 	}, true, true)
 }
 
-// Build_dns_question leaves EDNS/DNSSEC off for follow-up questions.
+// Build_dns_question adds only the optional NSID OPT record to follow-up questions.
 func (sender *Udp_sender) Build_dns_question(dst_ip net.IP, src_port layers.UDPPort, dnsid uint16, question layers.DNSQuestion, rd bool) (layers.IPv4, layers.UDP, []byte) {
 	return sender.build_dns(dst_ip, src_port, dnsid, question, rd, false)
 }
@@ -135,6 +135,11 @@ func (sender *Udp_sender) build_dns(dst_ip net.IP, src_port layers.UDPPort, dnsi
 		ID:        dnsid,
 	}
 	if initial && (config.Cfg.EDNS0_enabled || config.Cfg.Dnssec_enabled) {
+		dns.Additionals = []layers.DNSResourceRecord{optRecord}
+		dns.ARCount = 1
+	} else if !initial && config.Cfg.Follow_up_nsid {
+		optRecord.TTL = 0
+		optRecord.OPT = []layers.DNSOPT{{Code: layers.DNSOptionCodeNSID}}
 		dns.Additionals = []layers.DNSResourceRecord{optRecord}
 		dns.ARCount = 1
 	}

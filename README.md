@@ -86,17 +86,35 @@ python3 src/postprocessing/postproc_data_udp_pure.py <input_file> <output_file>
 ```
 
 
+### Polars postprocessing with follow-up results
+
+The new `src/postprocessing/postproc_data_udp_followup.py` and
+`src/postprocessing/postproc_data_tcp_followup.py` merge initial and follow-up
+results into wide tables without filtering out unexpected A-record answers.
+They annotate DNS errors, missing control records, unexpected question names,
+and IP inconsistencies. See [usage and output fields](src/postprocessing/README.md).
+
 ### Optional DNS follow-up queries
 
 Both standalone scanners support an optional list of questions sent to the original
 target after its first valid DNS response, including empty answers and DNS errors:
 
 ```yaml
+follow_up_nsid: true
 follow_up_queries:
   - name: version.bind
     type: TXT
     class: CH
   - name: version.server
+    type: TXT
+    class: CH
+  - name: id.server
+    type: TXT
+    class: CH
+  - name: hostname.bind
+    type: TXT
+    class: CH
+  - name: authors.bind
     type: TXT
     class: CH
 ```
@@ -105,30 +123,41 @@ Omit the list or use `follow_up_queries: []` to disable it. Each entry requires
 `name`, `type` (`A`, `AAAA`, `DNSKEY`, `ANY`, or `TXT`), and `class` (`IN` or `CH`).
 An optional trailing dot in the name is accepted.
 
-When the initial target and response IPs match, each question is sent once with
-recursion desired (RD=1). When they differ, each question is sent twice, with
-RD=1 and RD=0. Both variants still go to the original target, using the scan's
-protocol and destination port. RD=1 requests recursion; the target may forward,
-answer locally, or refuse the query. Follow-up replies never trigger more queries.
-Each TCP variant opens a fresh raw connection. Follow-ups omit EDNS/DNSSEC, share
-the scan's probe rate limiter, and time out after 10 seconds without retries.
+Each configured question is sent once with recursion desired (RD=1), including
+when the initial target and response IPs differ. Queries go to the original target,
+using the scan's protocol and destination port. RD=1 requests recursion; the target
+may forward, answer locally, or refuse the query. Follow-up replies never trigger
+more queries. Each TCP follow-up opens a fresh raw connection.
+
+`follow_up_nsid: true` adds an empty NSID option (code 3) in an EDNS OPT record to
+every follow-up, over either UDP or TCP. It does not send a separate query. The
+option defaults to false; NSID requires EDNS, which this setting adds automatically
+without enabling DNSSEC. Initial scan queries are unaffected. Servers may omit NSID
+or reject the query, and a transparent proxy may return an upstream identifier.
+NSID is an opaque identifier, not necessarily a software version. Follow-ups share
+the scan's probe rate limiter and time out after 10 seconds without retries.
 Traceroute, rate-limit tests, and internal discovery scans do not run follow-ups.
 
-The primary scan CSV stays unchanged. Follow-ups are saved to a separate gzip CSV
+Existing primary CSV columns retain their positions. New primary rows append
+`rcode` and `response_qnames` (a JSON array; empty TCP packet fields before a DNS
+response). The Polars postprocessors accept both old and extended formats.
+Follow-ups are saved to a separate gzip CSV
 (e.g. `tcp_results_followups.csv.gz` for `tcp_results.csv.gz`), with a header:
 
 ```text
-parent_id;query_index;initial_response_ip;target_ip;response_ip;protocol;qname;qtype;qclass;request_rd;timestamp_request;timestamp_response;status;rcode;txt_json;dns_response_base64
+parent_id;query_index;initial_response_ip;target_ip;response_ip;protocol;qname;qtype;qclass;request_rd;timestamp_request;timestamp_response;status;rcode;txt_json;dns_response_base64;nsid_hex
 ```
 
 `parent_id` links to the primary scan ID; `query_index` is zero-based. `request_rd`
-records the sent value (1 or 0). `status` is `response`, `timeout`, or `reset`.
+records the sent value (always 1 for new scans). `status` is `response`, `timeout`, or `reset`.
 `rcode` is always a separate column, numeric for DNS replies (including 0 for
 NOERROR) and empty for timeout/reset without a DNS reply. `txt_json` preserves
 TXT records as arrays of string segments; `dns_response_base64` preserves the
-whole DNS message without the TCP length prefix. There is one terminal row per
-question/RD variant. Normal shutdown waits for pending follow-ups and flushes
-both outputs. As with the existing scanner, TCP replies must fit in one complete
+whole DNS message without the TCP length prefix. The appended `nsid_hex` column
+contains the returned NSID as hexadecimal, or is empty when none is returned.
+Existing columns retain their positions. There is one terminal row per question.
+Normal shutdown waits for pending follow-ups and flushes both outputs.
+As with the existing scanner, TCP replies must fit in one complete
 DNS frame in one TCP segment; general TCP stream reassembly is not implemented.
 
 ## DNS Traceroute Tools

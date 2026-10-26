@@ -8,12 +8,12 @@ import (
 	"dns_tools/logging"
 	"dns_tools/scanner"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
 	"net"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -73,6 +73,8 @@ type Udp_scan_data_item struct {
 	Dns_flags        uint16
 	Ttl              int
 	Followup         *scanner.Follow_up
+	Dns_rcode        layers.DNSResponseCode
+	Dns_qnames       []string
 }
 
 func (u *Udp_scan_data_item) Get_timestamp() time.Time {
@@ -102,7 +104,7 @@ func (udps *Udp_scanner) Write_item(scan_item *scanner.Scan_data_item) {
 }
 
 func scan_item_to_strarr(scan_item *Udp_scan_data_item) []string {
-	// csv format: id;target_ip;response_ip;arecords;timestamp_request;timestamp_response;port;dnsid;dns_pkt_size,<<record-type>-<base64-data>,...>;dnsflags;dns-ttl
+	// csv format: id;target_ip;response_ip;arecords;timestamp_request;timestamp_response;port;dnsid;dns_pkt_size;dns_rrs;dnsflags;dns-ttl;rcode;response_qnames
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.Id)))
@@ -142,6 +144,9 @@ func scan_item_to_strarr(scan_item *Udp_scan_data_item) []string {
 	record = append(record, dns_recs_str)
 	record = append(record, strconv.Itoa((int)(scan_item.Dns_flags)))
 	record = append(record, strconv.Itoa((int)(scan_item.Ttl)))
+	record = append(record, strconv.Itoa(int(scan_item.Dns_rcode)))
+	qnames, _ := json.Marshal(scan_item.Dns_qnames)
+	record = append(record, string(qnames))
 
 	return record
 }
@@ -207,6 +212,9 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			question := layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSType(udps.DNS_type), Class: layers.DNSClassIN}
 			if udp_scan_item.Followup != nil {
 				question = udp_scan_item.Followup.Query.Question()
+			} else if len(dns.Questions) == 1 {
+				// Retain unexpected initial question names for postprocessing.
+				question.Name = dns.Questions[0].Name
 			}
 			if !scanner.Match_question(dns, question) {
 				udps.Scan_data.Mu.Unlock()
@@ -222,6 +230,11 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 		}
 		udp_scan_item.Dns_flags = (uint16)(udp.LayerPayload()[2])<<8 | (uint16)(udp.LayerPayload()[3])
 		udp_scan_item.Dns_payload_size = len(udp.LayerPayload())
+		udp_scan_item.Dns_rcode = dns.ResponseCode
+		udp_scan_item.Dns_qnames = make([]string, len(dns.Questions))
+		for i, q := range dns.Questions {
+			udp_scan_item.Dns_qnames[i] = string(q.Name)
+		}
 		udps.Scan_data.Mu.Unlock()
 		if udp_scan_item.Followup != nil {
 			udp_scan_item.Followup.Complete("response", ip.SrcIP, dns, pld)
@@ -316,6 +329,10 @@ func (udps *Udp_scanner) gen_ips_wait(netip net.IP, hostsize int) {
 }
 
 func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
+	if len(args) < 1 {
+		logging.Println(1, "Start", "ERR need target IP, net in CIDR notation, or filename of IP list")
+		return
+	}
 	if err := config.Cfg.Validate_followups(); err != nil {
 		panic(err)
 	}
@@ -337,12 +354,6 @@ func (udps *Udp_scanner) Start_scan(args []string, outpath string) {
 
 	// write start ts to log
 	logging.Write_to_runlog("START " + time.Now().UTC().String())
-	// command line args
-	if len(os.Args) < 2 {
-		logging.Write_to_runlog("END " + time.Now().UTC().String() + " arg not given")
-		logging.Println(1, "Start", "ERR need filename or net in CIDR notation")
-		return
-	}
 	var fname string
 	var netip net.IP
 	var hostsize int

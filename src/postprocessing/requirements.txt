@@ -1,0 +1,2 @@
+polars==2.1.0
+dnspython==2.9.0

@@ -44,7 +44,7 @@ func (tcps *Tcp_scanner) send_followup(probe *scanner.Follow_up) {
 	id := tcps.get_next_id()
 	seq, port := (id&0x1FFFFF)*2048, layers.TCPPort((id>>21)+61440)
 	dnsid := uint16(rand.Intn(65536))
-	ip, tcp, payload := tcps.Build_ack_with_question(probe.Target_ip, port, 0, seq, probe.Query.Question(), dnsid, probe.RD)
+	ip, tcp, payload := tcps.Build_ack_with_question(probe.Target_ip, port, 0, seq, probe.Query.Question(), dnsid, probe.RD, config.Cfg.Follow_up_nsid)
 	tcp.SYN, tcp.ACK, tcp.PSH, tcp.Ack = true, false, false, 0
 	c := &followup_connection{probe: probe, ip: ip, tcp: tcp, payload: payload, dnsid: dnsid, expected_ack: seq + 1}
 	tcps.Scan_data.Mu.Lock()

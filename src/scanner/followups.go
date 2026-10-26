@@ -5,6 +5,7 @@ import (
 	"dns_tools/config"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -19,7 +20,7 @@ import (
 
 const Response_timeout = 10 * time.Second
 
-// Follow_up is one question/RD variant. Its metadata is immutable after sending.
+// Follow_up is one configured question. Its metadata is immutable after sending.
 type Follow_up struct {
 	Parent_id           uint32
 	Query_index         int
@@ -61,7 +62,7 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 	z := gzip.NewWriter(f)
 	cw := csv.NewWriter(z)
 	cw.Comma = ';'
-	if err := cw.Write([]string{"parent_id", "query_index", "initial_response_ip", "target_ip", "response_ip", "protocol", "qname", "qtype", "qclass", "request_rd", "timestamp_request", "timestamp_response", "status", "rcode", "txt_json", "dns_response_base64"}); err != nil {
+	if err := cw.Write([]string{"parent_id", "query_index", "initial_response_ip", "target_ip", "response_ip", "protocol", "qname", "qtype", "qclass", "request_rd", "timestamp_request", "timestamp_response", "status", "rcode", "txt_json", "dns_response_base64", "nsid_hex"}); err != nil {
 		panic(err)
 	}
 	bs.Followups = &Follow_ups{
@@ -190,24 +191,18 @@ func (bs *Base_scanner) Schedule_followups(id uint32, target, response net.IP) {
 		}
 	}
 	for i, query := range f.queries {
-		variants := []bool{true}
-		if !target.Equal(response) {
-			variants = append(variants, false)
-		}
-		for _, rd := range variants {
-			probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: rd, owner: f}
-			f.mu.Lock()
-			if f.closed {
-				f.mu.Unlock()
-				return
-			}
-			f.pending[probe] = true
+		probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: true, owner: f}
+		f.mu.Lock()
+		if f.closed {
 			f.mu.Unlock()
-			select {
-			case f.queue <- probe:
-			case <-bs.Stop_chan:
-				return
-			}
+			return
+		}
+		f.pending[probe] = true
+		f.mu.Unlock()
+		select {
+		case f.queue <- probe:
+		case <-bs.Stop_chan:
+			return
 		}
 	}
 }
@@ -222,7 +217,7 @@ func (p *Follow_up) Complete(status string, ip net.IP, dns *layers.DNS, payload 
 		f.mu.Unlock()
 		return
 	}
-	rcode, responseIP, received, txt, raw := "", "", "", "", ""
+	rcode, responseIP, received, txt, raw, nsid := "", "", "", "", "", ""
 	if dns != nil {
 		rcode = strconv.Itoa(int(dns.ResponseCode))
 		responseIP, received = ip.String(), time.Now().UTC().Format(time.RFC3339Nano)
@@ -241,6 +236,15 @@ func (p *Follow_up) Complete(status string, ip net.IP, dns *layers.DNS, payload 
 			panic(err)
 		}
 		txt, raw = string(encoded), base64.StdEncoding.EncodeToString(payload)
+		for _, rr := range dns.Additionals {
+			if rr.Type == layers.DNSTypeOPT {
+				for _, option := range rr.OPT {
+					if option.Code == layers.DNSOptionCodeNSID {
+						nsid = hex.EncodeToString(option.Data)
+					}
+				}
+			}
+		}
 	}
 	rd := "0"
 	if p.RD {
@@ -248,7 +252,7 @@ func (p *Follow_up) Complete(status string, ip net.IP, dns *layers.DNS, payload 
 	}
 	if err := f.writer.Write([]string{
 		strconv.FormatUint(uint64(p.Parent_id), 10), strconv.Itoa(p.Query_index), p.Initial_response_ip.String(), p.Target_ip.String(), responseIP,
-		f.protocol, p.Query.Name, p.Query.Type, p.Query.Class, rd, p.Sent.UTC().Format(time.RFC3339Nano), received, status, rcode, txt, raw,
+		f.protocol, p.Query.Name, p.Query.Type, p.Query.Class, rd, p.Sent.UTC().Format(time.RFC3339Nano), received, status, rcode, txt, raw, nsid,
 	}); err != nil {
 		panic(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"dns_tools/logging"
 	"dns_tools/scanner"
 	"encoding/binary"
+	"encoding/json"
 	"log"
 	"math"
 	"math/rand"
@@ -48,6 +49,8 @@ type tcp_scan_data_item struct {
 	Next     *tcp_scan_data_item
 
 	followups_started bool
+	dns_rcode         *layers.DNSResponseCode
+	dns_qnames        []string
 }
 
 func (t *tcp_scan_data_item) Get_timestamp() time.Time {
@@ -70,10 +73,10 @@ type tcp_scan_item_key struct {
 
 func (tcps *Tcp_scanner) Build_ack_with_dns(dst_ip net.IP, src_port layers.TCPPort, seq_num uint32, ack_num uint32) (layers.IPv4, layers.TCP, []byte) {
 	return tcps.Build_ack_with_question(dst_ip, src_port, seq_num, ack_num,
-		layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSTypeA, Class: layers.DNSClassIN}, uint16(rand.Intn(65536)), true)
+		layers.DNSQuestion{Name: []byte(config.Cfg.Dns_query), Type: layers.DNSTypeA, Class: layers.DNSClassIN}, uint16(rand.Intn(65536)), true, false)
 }
 
-func (tcps *Tcp_scanner) Build_ack_with_question(dst_ip net.IP, src_port layers.TCPPort, seq_num, ack_num uint32, qst layers.DNSQuestion, dnsid uint16, rd bool) (layers.IPv4, layers.TCP, []byte) {
+func (tcps *Tcp_scanner) Build_ack_with_question(dst_ip net.IP, src_port layers.TCPPort, seq_num, ack_num uint32, qst layers.DNSQuestion, dnsid uint16, rd, nsid bool) (layers.IPv4, layers.TCP, []byte) {
 	// === build packet ===
 	// Create ip layer
 	ip := layers.IPv4{
@@ -104,6 +107,10 @@ func (tcps *Tcp_scanner) Build_ack_with_question(dst_ip net.IP, src_port layers.
 		QDCount:   1,
 		OpCode:    layers.DNSOpCodeQuery,
 		ID:        dnsid,
+	}
+	if nsid {
+		dns.Additionals = []layers.DNSResourceRecord{{Type: layers.DNSTypeOPT, Class: 4096, OPT: []layers.DNSOPT{{Code: layers.DNSOptionCodeNSID}}}}
+		dns.ARCount = 1
 	}
 
 	dns_buf := gopacket.NewSerializeBuffer()
@@ -156,6 +163,13 @@ func scan_item_to_strarr(scan_item *tcp_scan_data_item) []string {
 		}
 	}
 	record = append(record, dns_answers)
+	rcode, qnames := "", ""
+	if scan_item.dns_rcode != nil {
+		rcode = strconv.Itoa(int(*scan_item.dns_rcode))
+		encoded, _ := json.Marshal(scan_item.dns_qnames)
+		qnames = string(encoded)
+	}
+	record = append(record, rcode, qnames)
 	return record
 }
 
@@ -342,6 +356,12 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 				ACK: tcp_l.ACK,
 			},
 			dns_recs: answers_ip,
+		}
+		rcode := dns.ResponseCode
+		data.dns_rcode = &rcode
+		data.dns_qnames = make([]string, len(dns.Questions))
+		for i, q := range dns.Questions {
+			data.dns_qnames[i] = string(q.Name)
 		}
 		last_data_item.Next = &data
 		// send FIN-ACK to server

@@ -9,7 +9,7 @@ import (
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
-// Follow_up_query describes a DNS question; RD variants are selected by the scanner.
+// Follow_up_query describes a DNS question sent once with RD enabled.
 type Follow_up_query struct {
 	Name  string `yaml:"name"`
 	Type  string `yaml:"type"`
@@ -62,6 +62,8 @@ type Cfg_db struct {
 	Dns_query_type string `yaml:"dns_query_type" env-default:"A"`
 	// Optional questions sent after an initial response, in standalone scan mode only.
 	Follow_up_queries []Follow_up_query `yaml:"follow_up_queries"`
+	// Request an NSID in every follow-up's EDNS OPT record (UDP and TCP).
+	Follow_up_nsid bool `yaml:"follow_up_nsid" env-default:"false"`
 	// enable dnssec (only udp)
 	Dnssec_enabled bool `yaml:"dnssec_enabled" env-default:"false"`
 	// enable edns0 (only UDP)
