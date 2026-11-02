@@ -104,6 +104,10 @@ same layout with `tcp` in the directory and filenames. Both filenames use the
 same scan-start timestamp in UTC; the directory also includes seconds. An
 existing scan directory is rejected to prevent overwriting its results.
 
+Separate UDP and TCP service templates and alternating two-day timers, including
+output directory creation and overlap prevention, are available in
+[`systemd/`](systemd/README.md).
+
 ### Polars postprocessing with follow-up results
 
 The new `src/postprocessing/postproc_data_udp_followup.py` and

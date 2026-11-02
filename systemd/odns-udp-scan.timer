@@ -1,0 +1,11 @@
+[Unit]
+Description=Run an ODNS UDP scan every second day
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=2d
+AccuracySec=1s
+Unit=odns-udp-scan.service
+
+[Install]
+WantedBy=timers.target

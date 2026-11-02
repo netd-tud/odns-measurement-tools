@@ -1,0 +1,21 @@
+[Unit]
+Description=ODNS TCP scan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/opt/odns-measurement-tools/src
+# Adjust these values and the repository paths for your installation.
+Environment="SCAN_CONFIG=scanner/tcp/config.yml"
+Environment="SCAN_TARGET=/opt/odns-measurement-tools/data/targets.txt"
+Environment="OUTPUT_DIR=/opt/odns-measurement-tools/data/raw"
+ExecStartPre=/usr/bin/mkdir -p -- ${OUTPUT_DIR}/tcp /run/lock
+ExecStart=/usr/bin/flock --exclusive --no-fork /run/lock/odns-scan.lock /opt/odns-measurement-tools/src/dns_tool --mode scan --protocol tcp --config ${SCAN_CONFIG} --out ${OUTPUT_DIR} ${SCAN_TARGET}
+KillSignal=SIGINT
+TimeoutStopSec=120s
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
