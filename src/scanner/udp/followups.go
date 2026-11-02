@@ -23,6 +23,7 @@ func (udps *Udp_scanner) send_followup(probe *scanner.Follow_up) {
 		return
 	}
 	udps.send_udp(udps.Build_dns_question(probe.Target_ip, key.port, dnsid, probe.Query.Question(), probe.RD))
+	probe.Query_sent()
 }
 
 func (udps *Udp_scanner) send_udp(ip layers.IPv4, udp layers.UDP, payload []byte) {

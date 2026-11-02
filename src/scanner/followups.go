@@ -31,20 +31,23 @@ type Follow_up struct {
 	Sent                time.Time
 	owner               *Follow_ups
 	cleanup             func(string)
+	dispatched          bool
 }
 
 type Follow_ups struct {
-	mu       sync.Mutex
-	queries  []config.Follow_up_query
-	protocol string
-	queue    chan *Follow_up
-	pending  map[*Follow_up]bool
-	writer   *csv.Writer
-	zip      *gzip.Writer
-	file     *os.File
-	closed   bool
-	senders  sync.WaitGroup
-	handlers atomic.Int64
+	mu             sync.Mutex
+	queries        []config.Follow_up_query
+	protocol       string
+	queue          chan *Follow_up
+	pending        map[*Follow_up]bool
+	writer         *csv.Writer
+	zip            *gzip.Writer
+	file           *os.File
+	closed         bool
+	dispatched     []followup_dispatch
+	dispatch_ready chan struct{}
+	senders        sync.WaitGroup
+	handlers       atomic.Int64
 }
 
 func Follow_up_path(outpath string) string {
@@ -70,25 +73,36 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 		protocol: protocol, queue: make(chan *Follow_up, 1024), pending: make(map[*Follow_up]bool),
 		writer: cw, zip: z, file: f,
 	}
+	interval := config.Cfg.Follow_up_interval
+	if interval > 0 {
+		bs.Followups.dispatch_ready = make(chan struct{}, 1)
+	}
 	bs.Followups.senders.Add(int(config.Cfg.Number_routines))
 	bs.Wg.Add(2)
 	go func() {
 		defer bs.Wg.Done()
+		send_probe := func(probe *Follow_up) {
+			if config.Cfg.Pkts_per_sec > 0 {
+				bs.Send_limiter.Take()
+			}
+			select {
+			case <-bs.Stop_chan:
+				return
+			default:
+			}
+			bs.Followups.mu.Lock()
+			probe.Sent = time.Now()
+			bs.Followups.mu.Unlock()
+			send(probe)
+		}
+		if interval > 0 {
+			bs.send_spaced_followups(interval, send_probe)
+			return
+		}
 		for {
 			select {
 			case probe := <-bs.Followups.queue:
-				if config.Cfg.Pkts_per_sec > 0 {
-					bs.Send_limiter.Take()
-				}
-				select {
-				case <-bs.Stop_chan:
-					return
-				default:
-				}
-				bs.Followups.mu.Lock()
-				probe.Sent = time.Now()
-				bs.Followups.mu.Unlock()
-				send(probe)
+				send_probe(probe)
 			case <-bs.Stop_chan:
 				return
 			}
@@ -107,6 +121,28 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 			}
 		}
 	}()
+}
+
+// Query_sent releases the per-target interval after the DNS packet was sent.
+// TCP calls this after sending the query, rather than when starting its handshake.
+func (p *Follow_up) Query_sent() {
+	f := p.owner
+	if f.dispatch_ready == nil {
+		return
+	}
+	f.mu.Lock()
+	if p.dispatched {
+		f.mu.Unlock()
+		return
+	}
+	p.dispatched = true
+	f.dispatched = append(f.dispatched, followup_dispatch{p, time.Now()})
+	f.mu.Unlock()
+	// Never block a packet handler or a synchronous send callback.
+	select {
+	case f.dispatch_ready <- struct{}{}:
+	default:
+	}
 }
 
 // On_complete registers protocol-state cleanup before a probe is sent.
@@ -262,6 +298,8 @@ func (p *Follow_up) Complete(status string, ip net.IP, dns *layers.DNS, payload 
 	if cleanup != nil {
 		cleanup(status)
 	}
+	// A failed TCP handshake must also release the next query for this target.
+	p.Query_sent()
 }
 
 func (f *Follow_ups) idle() bool {

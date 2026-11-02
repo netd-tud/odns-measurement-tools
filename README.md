@@ -90,9 +90,13 @@ python3 src/postprocessing/postproc_data_udp_pure.py <input_file> <output_file>
 
 The new `src/postprocessing/postproc_data_udp_followup.py` and
 `src/postprocessing/postproc_data_tcp_followup.py` merge initial and follow-up
-results into wide tables without filtering out unexpected A-record answers.
+results without filtering out unexpected A-record answers. Each selected follow-up
+adds its `txt_json` in a column named after the question (defaults: `version.server`
+and `version.bind`), plus an `_rd0_used` flag recording whether the RD=0 fallback supplied it.
 They annotate DNS errors, missing control records, unexpected question names,
 and IP inconsistencies. See [usage and output fields](src/postprocessing/README.md).
+Processing uses disk partitions with an approximate 1024 MiB RAM target by default;
+`--memory-mb`, `--workers`, and `--temp-dir` control memory, parallelism, and temporary storage.
 
 ### Optional DNS follow-up queries
 
@@ -101,6 +105,7 @@ target after its first valid DNS response, including empty answers and DNS error
 
 ```yaml
 follow_up_nsid: true
+follow_up_interval: 1s
 follow_up_queries:
   - name: version.bind
     type: TXT
@@ -129,6 +134,15 @@ using the scan's protocol and destination port. RD=1 requests recursion; the tar
 may forward, answer locally, or refuse the query. Follow-up replies never trigger
 more queries. Each TCP follow-up opens a fresh raw connection.
 
+`follow_up_interval` sets a minimum gap between follow-up DNS queries to the same
+target IP, for both UDP and TCP. It accepts durations such as `1s` or `250ms`;
+omitting it or setting `0s` keeps the previous behavior with no additional gap.
+The first follow-up can be sent immediately. Other target IPs continue independently,
+and all follow-ups still share the scan's packet rate limit. For TCP, the gap starts
+after the DNS query is sent, following its handshake; a failed handshake releases
+the next query after the interval. This setting does not change the 10-second
+response timeout, which starts only when a follow-up is launched.
+
 `follow_up_nsid: true` adds an empty NSID option (code 3) in an EDNS OPT record to
 every follow-up, over either UDP or TCP. It does not send a separate query. The
 option defaults to false; NSID requires EDNS, which this setting adds automatically
@@ -141,6 +155,10 @@ Traceroute, rate-limit tests, and internal discovery scans do not run follow-ups
 Existing primary CSV columns retain their positions. New primary rows append
 `rcode` and `response_qnames` (a JSON array; empty TCP packet fields before a DNS
 response). The Polars postprocessors accept both old and extended formats.
+This metadata is written even when follow-ups are disabled: numeric `rcode` is
+column 13 for UDP and column 9 for TCP (counting from 1), including `0` for
+NOERROR, `2` for SERVFAIL and `5` for REFUSED. TCP packets without a DNS response
+have an empty RCODE field. Primary CSVs have no header.
 Follow-ups are saved to a separate gzip CSV
 (e.g. `tcp_results_followups.csv.gz` for `tcp_results.csv.gz`), with a header:
 

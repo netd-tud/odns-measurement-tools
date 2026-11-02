@@ -101,6 +101,7 @@ func (tcps *Tcp_scanner) handle_followup_pkt(ip *layers.IPv4, tcp *layers.TCP) b
 		tcps.Scan_data.Items[followup_ack_key{c.tcp.SrcPort, c.expected_ack}] = c
 		tcps.Scan_data.Mu.Unlock()
 		tcps.send_followup_packet(c, tcp.Ack, tcp.Seq+1, c.payload, false)
+		c.probe.Query_sent()
 		return true
 	}
 	if c.answered {

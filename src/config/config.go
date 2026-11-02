@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/gopacket/gopacket/layers"
@@ -28,6 +29,9 @@ func (q Follow_up_query) Question() layers.DNSQuestion {
 }
 
 func (cfg *Cfg_db) Validate_followups() error {
+	if cfg.Follow_up_interval < 0 {
+		return fmt.Errorf("follow_up_interval must not be negative")
+	}
 	for i, q := range cfg.Follow_up_queries {
 		name := strings.TrimSuffix(q.Name, ".")
 		valid := name != "" && len(name) <= 253 && !strings.ContainsFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
@@ -64,6 +68,8 @@ type Cfg_db struct {
 	Follow_up_queries []Follow_up_query `yaml:"follow_up_queries"`
 	// Request an NSID in every follow-up's EDNS OPT record (UDP and TCP).
 	Follow_up_nsid bool `yaml:"follow_up_nsid" env-default:"false"`
+	// Minimum interval between follow-up DNS queries to the same target (UDP and TCP).
+	Follow_up_interval time.Duration `yaml:"follow_up_interval" env-default:"0s"`
 	// enable dnssec (only udp)
 	Dnssec_enabled bool `yaml:"dnssec_enabled" env-default:"false"`
 	// enable edns0 (only UDP)
