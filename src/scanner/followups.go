@@ -38,6 +38,7 @@ type Follow_up struct {
 type Follow_ups struct {
 	mu             sync.Mutex
 	queries        []config.Follow_up_query
+	rd_values      []bool
 	protocol       string
 	queue          chan *Follow_up
 	pending        map[*Follow_up]bool
@@ -76,9 +77,16 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 		panic(err)
 	}
 	bs.Followups = &Follow_ups{
-		queries:  append([]config.Follow_up_query(nil), config.Cfg.Follow_up_queries...),
-		protocol: protocol, queue: make(chan *Follow_up, 1024), pending: make(map[*Follow_up]bool),
+		queries:   append([]config.Follow_up_query(nil), config.Cfg.Follow_up_queries...),
+		rd_values: []bool{true},
+		protocol:  protocol, queue: make(chan *Follow_up, 1024), pending: make(map[*Follow_up]bool),
 		writer: cw, zip: z, file: f,
+	}
+	switch config.Cfg.Follow_up_rd {
+	case "0":
+		bs.Followups.rd_values[0] = false
+	case "both":
+		bs.Followups.rd_values = append(bs.Followups.rd_values, false)
 	}
 	interval := config.Cfg.Follow_up_interval
 	if interval > 0 {
@@ -234,18 +242,20 @@ func (bs *Base_scanner) Schedule_followups(id uint32, target, response net.IP) {
 		}
 	}
 	for i, query := range f.queries {
-		probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: true, owner: f}
-		f.mu.Lock()
-		if f.closed {
+		for _, rd := range f.rd_values {
+			probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: rd, owner: f}
+			f.mu.Lock()
+			if f.closed {
+				f.mu.Unlock()
+				return
+			}
+			f.pending[probe] = true
 			f.mu.Unlock()
-			return
-		}
-		f.pending[probe] = true
-		f.mu.Unlock()
-		select {
-		case f.queue <- probe:
-		case <-bs.Stop_chan:
-			return
+			select {
+			case f.queue <- probe:
+			case <-bs.Stop_chan:
+				return
+			}
 		}
 	}
 }

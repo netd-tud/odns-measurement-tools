@@ -3,7 +3,10 @@ iface_ip: <ip>
 dst_port: 53
 dns_query: <domain>
 # Optional follow-up questions after a DNS response. Empty/omitted disables them.
-# Each configured question is sent once with RD=1.
+# RD variants for every question: "1", "0", or "both" (RD=1 then RD=0).
+follow_up_rd: "1"
+# Minimum delay between follow-up queries to the same IP, including RD variants:
+follow_up_interval: 0s
 # Request NSID in all follow-ups using EDNS (no extra query):
 follow_up_nsid: false
 # Each follow-up uses a fresh raw TCP connection.

@@ -127,6 +127,7 @@ target after its first valid DNS response, including empty answers and DNS error
 
 ```yaml
 follow_up_nsid: true
+follow_up_rd: "1"  # "1", "0", or "both"
 follow_up_interval: 1s
 follow_up_queries:
   - name: version.bind
@@ -150,14 +151,18 @@ Omit the list or use `follow_up_queries: []` to disable it. Each entry requires
 `name`, `type` (`A`, `AAAA`, `DNSKEY`, `ANY`, or `TXT`), and `class` (`IN` or `CH`).
 An optional trailing dot in the name is accepted.
 
-Each configured question is sent once with recursion desired (RD=1), including
-when the initial target and response IPs differ. Queries go to the original target,
-using the scan's protocol and destination port. RD=1 requests recursion; the target
-may forward, answer locally, or refuse the query. Follow-up replies never trigger
-more queries. Each TCP follow-up opens a fresh raw connection.
+`follow_up_rd` selects the recursion desired bit for every configured question:
+`"1"` sends only RD=1 (the default), `"0"` sends only RD=0, and `"both"` sends
+RD=1 followed by RD=0 for each question. This applies whether the initial target
+and response IPs match or differ. Both variants retain the same `query_index`;
+the `request_rd` column distinguishes them. Queries go to the original target,
+using the scan's protocol and destination port. RD=1 requests recursion; the
+target may forward, answer locally, or refuse the query. Follow-up replies never
+trigger more queries. Each TCP follow-up opens a fresh raw connection.
 
 `follow_up_interval` sets a minimum gap between follow-up DNS queries to the same
-target IP, for both UDP and TCP. It accepts durations such as `1s` or `250ms`;
+target IP, including the two RD variants in `both` mode, for both UDP and TCP.
+It accepts durations such as `1s` or `250ms`;
 omitting it or setting `0s` keeps the previous behavior with no additional gap.
 The first follow-up can be sent immediately. Other target IPs continue independently,
 and all follow-ups still share the scan's packet rate limit. For TCP, the gap starts

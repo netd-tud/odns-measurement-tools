@@ -10,7 +10,7 @@ import (
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
-// Follow_up_query describes a DNS question sent once with RD enabled.
+// Follow_up_query describes a DNS question sent with the configured RD variants.
 type Follow_up_query struct {
 	Name  string `yaml:"name"`
 	Type  string `yaml:"type"`
@@ -29,6 +29,11 @@ func (q Follow_up_query) Question() layers.DNSQuestion {
 }
 
 func (cfg *Cfg_db) Validate_followups() error {
+	switch cfg.Follow_up_rd {
+	case "", "1", "0", "both":
+	default:
+		return fmt.Errorf("follow_up_rd: unsupported value %q (use 1, 0, or both)", cfg.Follow_up_rd)
+	}
 	if cfg.Follow_up_interval < 0 {
 		return fmt.Errorf("follow_up_interval must not be negative")
 	}
@@ -66,6 +71,8 @@ type Cfg_db struct {
 	Dns_query_type string `yaml:"dns_query_type" env-default:"A"`
 	// Optional questions sent after an initial response, in standalone scan mode only.
 	Follow_up_queries []Follow_up_query `yaml:"follow_up_queries"`
+	// Recursion desired variants for follow-ups: "1", "0", or "both".
+	Follow_up_rd string `yaml:"follow_up_rd" env-default:"1"`
 	// Request an NSID in every follow-up's EDNS OPT record (UDP and TCP).
 	Follow_up_nsid bool `yaml:"follow_up_nsid" env-default:"false"`
 	// Minimum interval between follow-up DNS queries to the same target (UDP and TCP).
