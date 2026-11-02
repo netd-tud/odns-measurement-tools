@@ -5,6 +5,7 @@ import (
 	"dns_tools/config"
 	"dns_tools/logging"
 	"dns_tools/ratelimit"
+	"dns_tools/scanner"
 	tcpscanner "dns_tools/scanner/tcp"
 	udpscanner "dns_tools/scanner/udp"
 	traceroute_tcp "dns_tools/traceroute"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"time"
 )
 
 var cpu_file *os.File
@@ -45,7 +47,7 @@ func main() {
 		config_alias    = flag.String("c", "", "alias for -config")
 		pktrate         = flag.Int("rate", -2, "packet rate in pkt/s, -1 for unlimited")
 		pktrate_alias   = flag.Int("r", -2, "alias for rate")
-		outpath         = flag.String("out", "", "output file path")
+		outpath         = flag.String("out", "", "output directory (scans default to ./data/raw)")
 		outpath_alias   = flag.String("o", "", "alias for out")
 		profile         = flag.Bool("profile", false, "enable cpu profiling (output file: cpu.prof)")
 		debug_level     = flag.Int("verbose", -1, "overwrites the debug level set in the config")
@@ -129,22 +131,25 @@ func main() {
 				fmt.Println("missing protocol")
 				os.Exit(int(common.WRONG_INPUT_ARGS))
 			}
+			if *prot_flag == "tcp" || *prot_flag == "udp" {
+				path, err := scanner.Scan_output_path(*outpath, *prot_flag, time.Now())
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(int(common.WRONG_INPUT_ARGS))
+				}
+				*outpath = path
+				fmt.Println("scan output:", path)
+			}
 			switch *prot_flag {
 			case "tcp":
 				fmt.Println("starting tcp scan")
 				logging.Runlog_prefix = "TCP-SCAN"
 				var tcp_scanner tcpscanner.Tcp_scanner
-				if *outpath == "" {
-					*outpath = "tcp_results.csv.gz"
-				}
 				tcp_scanner.Start_scan(flag.Args(), *outpath)
 			case "udp":
 				fmt.Println("starting udp scan")
 				logging.Runlog_prefix = "UDP-SCAN"
 				var udp_scanner udpscanner.Udp_scanner
-				if *outpath == "" {
-					*outpath = "udp_results.csv.gz"
-				}
 				udp_scanner.Start_scan(flag.Args(), *outpath)
 			default:
 				fmt.Println("wrong protocol")

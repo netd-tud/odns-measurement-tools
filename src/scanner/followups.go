@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,12 @@ type Follow_ups struct {
 }
 
 func Follow_up_path(outpath string) string {
+	name := filepath.Base(outpath)
+	for _, protocol := range []string{"udp", "tcp"} {
+		if strings.HasPrefix(name, "odns_"+protocol+"_scan_") {
+			return filepath.Join(filepath.Dir(outpath), strings.Replace(name, "_scan_", "_followup_queries_", 1))
+		}
+	}
 	return strings.TrimSuffix(strings.TrimSuffix(outpath, ".gz"), ".csv") + "_followups.csv.gz"
 }
 

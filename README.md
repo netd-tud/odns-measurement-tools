@@ -21,7 +21,7 @@ The data of the last scan can be accessed via an API on https://odns-data.netd.c
   -m, --mode [string]
     	available modes: <(s|scan) | (t|trace|traceroute) | (r|rate|ratelimit)>
   -o, --out [string]
-    	output file path
+      output directory (scans default to ./data/raw)
   --profile
     	enable cpu profiling (output file: cpu.prof)
   -p, --protocol [string]
@@ -51,7 +51,7 @@ cd src
 sudo go run dns_tool.go --mode scan --protocol tcp --config scanner/tcp/config.yml <net-to-scan-in-CIDR|filename-of-ip-list>
 ```
 
-Results are written to `tcp_results.csv.gz`
+Results are written below `./data/raw/tcp/<scan-start-timestamp>/`.
 
 **Postprocessing:**
 
@@ -75,7 +75,7 @@ cd src
 sudo go run dns_tool.go --mode scan --protocol udp --config scanner/udp/config.yml [net-to-scan-in-CIDR|filename-of-ip-list]
 ```
 
-Results are written to `udp_results.csv.gz`
+Results are written below `./data/raw/udp/<scan-start-timestamp>/`.
 
 **Postprocessing:**
 
@@ -85,6 +85,24 @@ Appends the type of forwarder to the results file
 python3 src/postprocessing/postproc_data_udp_pure.py <input_file> <output_file>
 ```
 
+
+### Scan output directories
+
+Use `--out /path/to/results` (or `-o /path/to/results`) to select the base directory.
+Without this option, scans use `data/raw/` relative to the current working directory.
+Protocol and scan-start directories are created automatically. For example, a UDP
+scan starting at 15:04:22 UTC on 2026-11-02 produces:
+
+```text
+data/raw/udp/2026-11-02_15-04-22/
+  odns_udp_scan_2026-11-02_15-04.csv.gz
+  odns_udp_followup_queries_2026-11-02_15-04.csv.gz
+```
+
+The follow-up file is created when follow-up queries are enabled. TCP uses the
+same layout with `tcp` in the directory and filenames. Both filenames use the
+same scan-start timestamp in UTC; the directory also includes seconds. An
+existing scan directory is rejected to prevent overwriting its results.
 
 ### Polars postprocessing with follow-up results
 
@@ -160,7 +178,7 @@ column 13 for UDP and column 9 for TCP (counting from 1), including `0` for
 NOERROR, `2` for SERVFAIL and `5` for REFUSED. TCP packets without a DNS response
 have an empty RCODE field. Primary CSVs have no header.
 Follow-ups are saved to a separate gzip CSV
-(e.g. `tcp_results_followups.csv.gz` for `tcp_results.csv.gz`), with a header:
+(e.g. `odns_tcp_followup_queries_2026-11-02_15-04.csv.gz`), with a header:
 
 ```text
 parent_id;query_index;initial_response_ip;target_ip;response_ip;protocol;qname;qtype;qclass;request_rd;timestamp_request;timestamp_response;status;rcode;txt_json;dns_response_base64;nsid_hex
