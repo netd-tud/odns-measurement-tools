@@ -1,11 +1,13 @@
 package tcpscanner
 
 import (
+	"dns_tools/common"
 	"dns_tools/config"
 	"dns_tools/scanner"
 	"encoding/binary"
 	"math/rand"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -31,9 +33,12 @@ type followup_connection struct {
 	expected_ack        uint32
 	next_seq            uint32
 	handshake, answered bool
+	on_timeout          func()
+	expire_once         sync.Once
 }
 
 func (c *followup_connection) Get_timestamp() time.Time { return c.probe.Sent }
+func (c *followup_connection) On_timeout()              { c.expire_once.Do(c.on_timeout) }
 
 func (tcps *Tcp_scanner) remove_followup(c *followup_connection) {
 	delete(tcps.Scan_data.Items, followup_connection_key{c.tcp.SrcPort, c.tcp.Seq})
@@ -42,11 +47,23 @@ func (tcps *Tcp_scanner) remove_followup(c *followup_connection) {
 
 func (tcps *Tcp_scanner) send_followup(probe *scanner.Follow_up) {
 	id := tcps.get_next_id()
-	seq, port := (id&0x1FFFFF)*2048, layers.TCPPort((id>>21)+61440)
+	seq, port := (id&0x1FFFFF)*2048, layers.TCPPort(probe.Source_port)
 	dnsid := uint16(rand.Intn(65536))
 	ip, tcp, payload := tcps.Build_ack_with_question(probe.Target_ip, port, 0, seq, probe.Query.Question(), dnsid, probe.RD, config.Cfg.Follow_up_nsid)
 	tcp.SYN, tcp.ACK, tcp.PSH, tcp.Ack = true, false, false, 0
 	c := &followup_connection{probe: probe, ip: ip, tcp: tcp, payload: payload, dnsid: dnsid, expected_ack: seq + 1}
+	c.on_timeout = func() {
+		tcps.Scan_data.Mu.Lock()
+		rst := c.tcp
+		rst.Seq, rst.Ack = c.expected_ack, c.next_seq
+		rst.SYN, rst.PSH, rst.FIN, rst.ACK, rst.RST = false, false, false, true, true
+		handshake := c.handshake
+		tcps.Scan_data.Mu.Unlock()
+		if handshake {
+			tcps.send_reset(c.ip, rst)
+		}
+		probe.Release_port()
+	}
 	tcps.Scan_data.Mu.Lock()
 	tcps.Scan_data.Items[followup_connection_key{port, seq}] = c
 	tcps.Scan_data.Items[followup_ack_key{port, c.expected_ack}] = c
@@ -59,6 +76,11 @@ func (tcps *Tcp_scanner) send_followup(probe *scanner.Follow_up) {
 		tcps.Scan_data.Mu.Lock()
 		tcps.remove_followup(c)
 		tcps.Scan_data.Mu.Unlock()
+		if status == "timeout" {
+			c.On_timeout()
+		} else {
+			probe.Release_port()
+		}
 	}) {
 		return
 	}
@@ -89,6 +111,7 @@ func (tcps *Tcp_scanner) handle_followup_pkt(ip *layers.IPv4, tcp *layers.TCP) b
 		tcps.remove_followup(c)
 		answered := c.answered
 		tcps.Scan_data.Mu.Unlock()
+		c.probe.Release_port()
 		if !answered {
 			c.probe.Complete("reset", nil, nil, nil)
 		}
@@ -109,6 +132,7 @@ func (tcps *Tcp_scanner) handle_followup_pkt(ip *layers.IPv4, tcp *layers.TCP) b
 			tcps.remove_followup(c)
 			tcps.Scan_data.Mu.Unlock()
 			tcps.send_followup_packet(c, tcp.Ack, tcp.Seq+1, nil, false)
+			c.probe.Release_port()
 			return true
 		}
 		tcps.Scan_data.Mu.Unlock()
@@ -136,6 +160,9 @@ func (tcps *Tcp_scanner) handle_followup_pkt(ip *layers.IPv4, tcp *layers.TCP) b
 	}
 	tcps.Scan_data.Mu.Unlock()
 	tcps.send_followup_packet(c, tcp.Ack, ack, nil, true)
+	if tcp.FIN {
+		c.probe.Release_port()
+	}
 	c.probe.Complete("response", ip.SrcIP, dns, payload)
 	return true
 }
@@ -146,6 +173,19 @@ func (tcps *Tcp_scanner) send_tcp(ip layers.IPv4, tcp layers.TCP, payload []byte
 		return
 	}
 	tcps.Send_tcp_pkt(ip, tcp, payload)
+}
+
+// Bypass the scanner's OUTPUT RST-drop rule when intentionally closing a stale connection.
+func (tcps *Tcp_scanner) send_reset(ip layers.IPv4, tcp layers.TCP) {
+	if tcps.send_packet != nil {
+		tcps.send_packet(ip, tcp, nil)
+		return
+	}
+	buffer := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(buffer, common.Opts, &ip, &tcp); err != nil {
+		panic(err)
+	}
+	tcps.L2_sender.Send(buffer.Bytes())
 }
 
 // Preserve the original primary ACK/FIN sender; allow packet fixtures to intercept it.

@@ -240,7 +240,7 @@ func (udps *Udp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			udp_scan_item.Followup.Complete("response", ip.SrcIP, dns, pld)
 			return
 		}
-		udps.Schedule_followups(udp_scan_item.Id, udp_scan_item.Ip, ip.SrcIP)
+		udps.Schedule_followups(udp_scan_item.Id, udp_scan_item.Ip, ip.SrcIP, uint16(udp_scan_item.Port))
 		// queue for writeout
 		udps.Write_chan <- &scan_item
 	} else {

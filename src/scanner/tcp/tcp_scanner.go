@@ -15,6 +15,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -51,6 +52,21 @@ type tcp_scan_data_item struct {
 	followups_started bool
 	dns_rcode         *layers.DNSResponseCode
 	dns_qnames        []string
+	followup_ready    atomic.Pointer[func(bool)]
+	followup_once     sync.Once
+	followup_expired  atomic.Bool
+	followup_fin_sent atomic.Bool
+}
+
+func (t *tcp_scan_data_item) finish_followups(timedOut bool) {
+	if ready := t.followup_ready.Load(); ready != nil {
+		t.followup_once.Do(func() { (*ready)(timedOut) })
+	}
+}
+
+func (t *tcp_scan_data_item) On_timeout() {
+	t.followup_expired.Store(true)
+	t.finish_followups(true)
 }
 
 func (t *tcp_scan_data_item) Get_timestamp() time.Time {
@@ -174,6 +190,7 @@ func scan_item_to_strarr(scan_item *tcp_scan_data_item) []string {
 }
 
 func (tcps *Tcp_scanner) Write_item(root_item *scanner.Scan_data_item) {
+	defer tcps.Track_followup_handler()()
 	tcp_root_item, ok := (*root_item).(*tcp_scan_data_item)
 	if !ok {
 		return
@@ -188,6 +205,7 @@ func (tcps *Tcp_scanner) Write_item(root_item *scanner.Scan_data_item) {
 	tcps.Scan_data.Mu.Lock()
 	delete(tcps.Scan_data.Items, tcp_scan_item_key{tcp_root_item.port, tcp_root_item.seq})
 	tcps.Scan_data.Mu.Unlock()
+	tcp_root_item.finish_followups(false)
 }
 
 func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
@@ -327,7 +345,28 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 			tcp_root_data_item.followups_started = true
 			tcps.Scan_data.Mu.Unlock()
 			if trigger {
-				tcps.Schedule_followups(tcp_root_data_item.id, tcp_root_data_item.ip, ip.SrcIP)
+				if config.Cfg.Follow_up_use_same_port {
+					response := append(net.IP(nil), ip.SrcIP...)
+					seq, ack := tcp_l.Ack, tcp_l.Seq+uint32(len(tcp_l.Payload))
+					ready := func(timedOut bool) {
+						if timedOut {
+							// Close a stalled primary connection before reusing its tuple.
+							ip, rst, _ := tcps.Build_ack_with_dns(tcp_root_data_item.ip, tcp_root_data_item.port, ack-1, seq)
+							rst.PSH, rst.RST = false, true
+							if tcp_root_data_item.followup_fin_sent.Load() {
+								rst.Seq++
+							}
+							tcps.send_reset(ip, rst)
+						}
+						tcps.Schedule_followups(tcp_root_data_item.id, tcp_root_data_item.ip, response, uint16(tcp_root_data_item.port))
+					}
+					tcp_root_data_item.followup_ready.Store(&ready)
+					if tcp_root_data_item.followup_expired.Load() {
+						tcp_root_data_item.finish_followups(true)
+					}
+				} else {
+					tcps.Schedule_followups(tcp_root_data_item.id, tcp_root_data_item.ip, ip.SrcIP, uint16(tcp_root_data_item.port))
+				}
 			}
 		}
 		answers := dns.Answers
@@ -365,6 +404,7 @@ func (tcps *Tcp_scanner) Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet) {
 		}
 		last_data_item.Next = &data
 		// send FIN-ACK to server
+		tcp_root_data_item.followup_fin_sent.Store(true)
 		tcps.send_ack_pos_fin(tcp_root_data_item.ip, tcp_l.DstPort, tcp_l.Seq, tcp_l.Ack, true)
 		// if this pkt is fin-psh-ack we will remove it from the map at this point already
 		// because we wont receive any further fin-ack from the server

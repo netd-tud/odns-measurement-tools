@@ -37,6 +37,19 @@ func (cfg *Cfg_db) Validate_followups() error {
 	if cfg.Follow_up_interval < 0 {
 		return fmt.Errorf("follow_up_interval must not be negative")
 	}
+	if len(cfg.Follow_up_queries) > 0 && !cfg.Follow_up_use_same_port {
+		if cfg.Follow_up_port_min == 0 || cfg.Follow_up_port_max < cfg.Follow_up_port_min {
+			return fmt.Errorf("follow_up_port_min/max must define a nonzero, ordered port range")
+		}
+		if cfg.Port_min != 0 || cfg.Port_max != 0 {
+			if cfg.Port_min == 0 || cfg.Port_max < cfg.Port_min {
+				return fmt.Errorf("port_min/max must define a nonzero, ordered port range")
+			}
+			if cfg.Follow_up_port_min <= cfg.Port_max && cfg.Port_min <= cfg.Follow_up_port_max {
+				return fmt.Errorf("follow_up_port_min/max must not overlap port_min/max")
+			}
+		}
+	}
 	for i, q := range cfg.Follow_up_queries {
 		name := strings.TrimSuffix(q.Name, ".")
 		valid := name != "" && len(name) <= 253 && !strings.ContainsFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
@@ -77,6 +90,10 @@ type Cfg_db struct {
 	Follow_up_nsid bool `yaml:"follow_up_nsid" env-default:"false"`
 	// Minimum interval between follow-up DNS queries to the same target (UDP and TCP).
 	Follow_up_interval time.Duration `yaml:"follow_up_interval" env-default:"0s"`
+	// Reuse the initial query's exact source port; defaults to true in Load_config.
+	Follow_up_use_same_port bool   `yaml:"follow_up_use_same_port"`
+	Follow_up_port_min      uint16 `yaml:"follow_up_port_min"`
+	Follow_up_port_max      uint16 `yaml:"follow_up_port_max"`
 	// enable dnssec (only udp)
 	Dnssec_enabled bool `yaml:"dnssec_enabled" env-default:"false"`
 	// enable edns0 (only UDP)
@@ -158,6 +175,8 @@ type Cfg_db struct {
 var Cfg Cfg_db
 
 func Load_config(config_path string) {
+	// Set before parsing so an explicit YAML false is preserved.
+	Cfg.Follow_up_use_same_port = true
 	err := cleanenv.ReadConfig(config_path, &Cfg)
 	if err != nil {
 		panic(err)

@@ -8,6 +8,11 @@ dns_query_type: A
 follow_up_rd: "1"
 # Minimum delay between follow-up queries to the same IP, including RD variants:
 follow_up_interval: 0s
+# Reuse the exact source port of the initial query (default true).
+follow_up_use_same_port: true
+# Required when false; this range must not overlap port_min/max.
+# follow_up_port_min: 50000
+# follow_up_port_max: 51000
 # Request NSID in all follow-ups using EDNS (no extra query):
 follow_up_nsid: false
 # follow_up_queries:

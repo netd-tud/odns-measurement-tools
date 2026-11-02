@@ -129,6 +129,7 @@ target after its first valid DNS response, including empty answers and DNS error
 follow_up_nsid: true
 follow_up_rd: "1"  # "1", "0", or "both"
 follow_up_interval: 1s
+follow_up_use_same_port: true
 follow_up_queries:
   - name: version.bind
     type: TXT
@@ -169,6 +170,30 @@ and all follow-ups still share the scan's packet rate limit. For TCP, the gap st
 after the DNS query is sent, following its handshake; a failed handshake releases
 the next query after the interval. This setting does not change the 10-second
 response timeout, which starts only when a follow-up is launched.
+
+`follow_up_use_same_port: true` (the default) reuses the initial query's exact
+source port for every follow-up, including both RD variants. TCP waits for the
+primary connection and each preceding follow-up connection to close before
+reusing that port. If the primary connection stalls, it is reset on timeout before
+follow-ups start.
+
+To use a separate source-port pool, configure:
+
+```yaml
+port_min: 61440
+port_max: 65535
+follow_up_use_same_port: false
+follow_up_port_min: 50000
+follow_up_port_max: 51000
+```
+
+Both follow-up bounds are required and must not overlap `port_min`/`port_max`.
+TCP also rejects overlap with its existing fixed primary range, 61440–63487.
+The scanner reserves available ports in the configured range and skips ports
+already in use. Each follow-up leases one port until its response, reset or
+timeout; TCP retains the lease until the connection closes or expires. If all
+ports are busy, follow-ups wait for a free port without consuming their response
+timeout. A scan fails at startup if no port in the pool can be reserved.
 
 `follow_up_nsid: true` adds an empty NSID option (code 3) in an EDNS OPT record to
 every follow-up, over either UDP or TCP. It does not send a separate query. The

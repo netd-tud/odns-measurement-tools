@@ -2,8 +2,11 @@
 
 The service templates run one scan each:
 
-- `odns-udp-scan.service`: UDP scan.
-- `odns-tcp-scan.service`: TCP scan.
+- `odns-udp-scan.service.template`: UDP scan.
+- `odns-tcp-scan.service.template`: TCP scan.
+
+All service and timer files in this directory end in `.template`. Copy and edit
+them for your installation; remove `.template` from the installed filenames.
 
 Matching timer files schedule alternating scans. Enable both timers together:
 
@@ -22,7 +25,7 @@ Build the scanner from the repository's `src/` directory:
 go build -o dns_tool .
 ```
 
-Edit the service files for your installation. Replace `/opt/odns-measurement-tools`
+Edit copies of the service templates for your installation. Replace `/opt/odns-measurement-tools`
 with your repository's absolute path in `WorkingDirectory`, `ExecStart`,
 `SCAN_TARGET`, and `OUTPUT_DIR`. Configure the interface and DNS query in each
 protocol's YAML configuration file.
@@ -51,7 +54,10 @@ are kept. The scanner also creates missing output directories when run directly.
 Install the edited services and timers from the repository root:
 
 ```bash
-sudo install -m 0644 systemd/odns-udp-scan.service systemd/odns-tcp-scan.service systemd/odns-udp-scan.timer systemd/odns-tcp-scan.timer /etc/systemd/system/
+sudo install -m 0644 systemd/odns-udp-scan.service.template /etc/systemd/system/odns-udp-scan.service
+sudo install -m 0644 systemd/odns-tcp-scan.service.template /etc/systemd/system/odns-tcp-scan.service
+sudo install -m 0644 systemd/odns-udp-scan.timer.template /etc/systemd/system/odns-udp-scan.timer
+sudo install -m 0644 systemd/odns-tcp-scan.timer.template /etc/systemd/system/odns-tcp-scan.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now odns-udp-scan.timer odns-tcp-scan.timer
 ```

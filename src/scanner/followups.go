@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,10 +30,14 @@ type Follow_up struct {
 	Target_ip           net.IP
 	Query               config.Follow_up_query
 	RD                  bool
+	Source_port         uint16
 	Sent                time.Time
 	owner               *Follow_ups
 	cleanup             func(string)
 	dispatched          bool
+	query_sent_at       time.Time
+	port_leased         bool
+	port_released       bool
 }
 
 type Follow_ups struct {
@@ -50,6 +55,9 @@ type Follow_ups struct {
 	dispatch_ready chan struct{}
 	senders        sync.WaitGroup
 	handlers       atomic.Int64
+	ports          chan uint16
+	port_sockets   []io.Closer
+	wait_for_close bool
 }
 
 func Follow_up_path(outpath string) string {
@@ -65,6 +73,9 @@ func Follow_up_path(outpath string) string {
 func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Follow_up)) {
 	if len(config.Cfg.Follow_up_queries) == 0 {
 		return
+	}
+	if err := config.Cfg.Validate_followups(); err != nil {
+		panic(err)
 	}
 	f, err := os.Create(Follow_up_path(outpath))
 	if err != nil {
@@ -89,7 +100,14 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 		bs.Followups.rd_values = append(bs.Followups.rd_values, false)
 	}
 	interval := config.Cfg.Follow_up_interval
-	if interval > 0 {
+	bs.Followups.wait_for_close = protocol == "tcp" && config.Cfg.Follow_up_use_same_port
+	if !config.Cfg.Follow_up_use_same_port {
+		if err := bs.Followups.reserve_ports(protocol); err != nil {
+			bs.Followups.Close()
+			panic(err)
+		}
+	}
+	if interval > 0 || bs.Followups.wait_for_close || bs.Followups.ports != nil {
 		bs.Followups.dispatch_ready = make(chan struct{}, 1)
 	}
 	bs.Followups.senders.Add(int(config.Cfg.Number_routines))
@@ -102,6 +120,7 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 			}
 			select {
 			case <-bs.Stop_chan:
+				probe.Release_port()
 				return
 			default:
 			}
@@ -110,7 +129,7 @@ func (bs *Base_scanner) Start_followups(outpath, protocol string, send func(*Fol
 			bs.Followups.mu.Unlock()
 			send(probe)
 		}
-		if interval > 0 {
+		if interval > 0 || bs.Followups.wait_for_close || bs.Followups.ports != nil {
 			bs.send_spaced_followups(interval, send_probe)
 			return
 		}
@@ -146,12 +165,19 @@ func (p *Follow_up) Query_sent() {
 		return
 	}
 	f.mu.Lock()
+	if p.query_sent_at.IsZero() {
+		p.query_sent_at = time.Now()
+	}
+	if f.wait_for_close && !p.port_released {
+		f.mu.Unlock()
+		return
+	}
 	if p.dispatched {
 		f.mu.Unlock()
 		return
 	}
 	p.dispatched = true
-	f.dispatched = append(f.dispatched, followup_dispatch{p, time.Now()})
+	f.dispatched = append(f.dispatched, followup_dispatch{p, p.query_sent_at})
 	f.mu.Unlock()
 	// Never block a packet handler or a synchronous send callback.
 	select {
@@ -231,7 +257,7 @@ func (bs *Base_scanner) Wait_followups() {
 }
 
 // Schedule_followups is called once for an accepted initial response, outside scan-data locks.
-func (bs *Base_scanner) Schedule_followups(id uint32, target, response net.IP) {
+func (bs *Base_scanner) Schedule_followups(id uint32, target, response net.IP, source_port uint16) {
 	f := bs.Followups
 	if f == nil {
 		return
@@ -243,7 +269,7 @@ func (bs *Base_scanner) Schedule_followups(id uint32, target, response net.IP) {
 	}
 	for i, query := range f.queries {
 		for _, rd := range f.rd_values {
-			probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: rd, owner: f}
+			probe := &Follow_up{Parent_id: id, Query_index: i, Initial_response_ip: append(net.IP(nil), response...), Target_ip: append(net.IP(nil), target...), Query: query, RD: rd, Source_port: source_port, owner: f}
 			f.mu.Lock()
 			if f.closed {
 				f.mu.Unlock()
@@ -315,6 +341,9 @@ func (p *Follow_up) Complete(status string, ip net.IP, dns *layers.DNS, payload 
 	if cleanup != nil {
 		cleanup(status)
 	}
+	if f.protocol != "tcp" || status != "response" {
+		p.Release_port()
+	}
 	// A failed TCP handshake must also release the next query for this target.
 	p.Query_sent()
 }
@@ -338,6 +367,9 @@ func (f *Follow_ups) Close() {
 		return
 	}
 	f.closed = true
+	for _, socket := range f.port_sockets {
+		socket.Close()
+	}
 	f.writer.Flush()
 	if err := f.writer.Error(); err != nil {
 		panic(err)

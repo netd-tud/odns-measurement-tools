@@ -36,16 +36,32 @@ func (bs *Base_scanner) send_spaced_followups(interval time.Duration, send func(
 	f := bs.Followups
 	targets := make(map[string]*followup_target)
 	ready := &followup_targets{}
+	var waitingPort *followup_target
+	dispatch := func(target *followup_target) {
+		probe := target.queries[0]
+		target.queries[0] = nil
+		target.queries = target.queries[1:]
+		target.waiting = probe
+		send(probe)
+	}
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
 	for {
 		var tick <-chan time.Time
-		if ready.Len() > 0 {
+		var available <-chan uint16
+		if waitingPort != nil {
+			available = f.ports
+		} else if ready.Len() > 0 {
 			timer.Reset(time.Until((*ready)[0].next))
 			tick = timer.C
 		}
 		select {
+		case port := <-available:
+			probe := waitingPort.queries[0]
+			probe.Source_port, probe.port_leased = port, true
+			dispatch(waitingPort)
+			waitingPort = nil
 		case probe := <-f.queue:
 			ip := probe.Target_ip.String()
 			target := targets[ip]
@@ -74,11 +90,13 @@ func (bs *Base_scanner) send_spaced_followups(interval time.Duration, send func(
 				delete(targets, target.ip)
 				break
 			}
-			probe := target.queries[0]
-			target.queries[0] = nil
-			target.queries = target.queries[1:]
-			target.waiting = probe
-			send(probe)
+			if f.ports != nil {
+				// Keep draining arrivals while the pool is exhausted, so timeout
+				// handlers can finish scheduling and release expired connections.
+				waitingPort = target
+			} else {
+				dispatch(target)
+			}
 		case <-bs.Stop_chan:
 			return
 		}

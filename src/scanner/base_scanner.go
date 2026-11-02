@@ -107,15 +107,24 @@ func (bs *Base_scanner) Timeout() {
 	for {
 		select {
 		case <-time.After(10 * time.Second):
+			handlerDone := bs.Track_followup_handler()
+			var expired []interface{ On_timeout() }
 			//go through map's keyset
 			bs.Scan_data.Mu.Lock()
 			for k, v := range bs.Scan_data.Items {
 				//remove each key where its timestamp is older than x seconds
 				if time.Now().Unix()-v.Get_timestamp().Unix() > 10 {
+					if item, ok := v.(interface{ On_timeout() }); ok {
+						expired = append(expired, item)
+					}
 					delete(bs.Scan_data.Items, k)
 				}
 			}
 			bs.Scan_data.Mu.Unlock()
+			for _, item := range expired {
+				item.On_timeout()
+			}
+			handlerDone()
 		case <-bs.Stop_chan:
 			return
 		}
