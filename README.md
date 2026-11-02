@@ -210,7 +210,8 @@ response). The Polars postprocessors accept both old and extended formats.
 This metadata is written even when follow-ups are disabled: numeric `rcode` is
 column 13 for UDP and column 9 for TCP (counting from 1), including `0` for
 NOERROR, `2` for SERVFAIL and `5` for REFUSED. TCP packets without a DNS response
-have an empty RCODE field. Primary CSVs have no header.
+have an empty RCODE field. Primary CSVs start with a semicolon-separated header;
+the Polars postprocessors also accept older files without headers.
 Follow-ups are saved to a separate gzip CSV
 (e.g. `odns_tcp_followup_queries_2026-11-02_15-04.csv.gz`), with a header:
 

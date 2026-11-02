@@ -189,6 +189,10 @@ func scan_item_to_strarr(scan_item *tcp_scan_data_item) []string {
 	return record
 }
 
+func (tcps *Tcp_scanner) CSV_header() []string {
+	return []string{"id", "timestamp", "ip", "port", "seq", "ack", "flags", "a_records", "rcode", "response_qnames"}
+}
+
 func (tcps *Tcp_scanner) Write_item(root_item *scanner.Scan_data_item) {
 	defer tcps.Track_followup_handler()()
 	tcp_root_item, ok := (*root_item).(*tcp_scan_data_item)

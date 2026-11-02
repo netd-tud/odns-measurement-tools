@@ -32,6 +32,7 @@ type root_scan_data struct {
 }
 
 type IScanner_Methods interface {
+	CSV_header() []string
 	Write_item(scan_item *Scan_data_item)
 	Handle_pkt(ip *layers.IPv4, pkt gopacket.Packet)
 }
@@ -78,6 +79,9 @@ func (bs *Base_scanner) Write_results(out_path string) {
 	bs.Writer = csv.NewWriter(zip_writer)
 	bs.Writer.Comma = ';'
 	defer bs.Writer.Flush()
+	if err := bs.Writer.Write(bs.Scanner_methods.CSV_header()); err != nil {
+		panic(err)
+	}
 
 	for {
 		select {

@@ -95,6 +95,10 @@ type udp_scan_item_key struct {
 	dnsid uint16
 }
 
+func (udps *Udp_scanner) CSV_header() []string {
+	return []string{"id", "target_ip", "response_ip", "a_records", "timestamp_request", "timestamp_response", "port", "dnsid", "dns_pkt_size", "dns_rrs", "dns_flags", "dns_ttl", "rcode", "response_qnames"}
+}
+
 func (udps *Udp_scanner) Write_item(scan_item *scanner.Scan_data_item) {
 	udp_scan_item, ok := (*scan_item).(*Udp_scan_data_item)
 	if !ok {
@@ -104,7 +108,7 @@ func (udps *Udp_scanner) Write_item(scan_item *scanner.Scan_data_item) {
 }
 
 func scan_item_to_strarr(scan_item *Udp_scan_data_item) []string {
-	// csv format: id;target_ip;response_ip;arecords;timestamp_request;timestamp_response;port;dnsid;dns_pkt_size;dns_rrs;dnsflags;dns-ttl;rcode;response_qnames
+	// csv format: id;target_ip;response_ip;a_records;timestamp_request;timestamp_response;port;dnsid;dns_pkt_size;dns_rrs;dns_flags;dns_ttl;rcode;response_qnames
 	// transform scan_item into string array for csv writer
 	var record []string
 	record = append(record, strconv.Itoa(int(scan_item.Id)))
